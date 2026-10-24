@@ -3,13 +3,13 @@ import jwt from 'jsonwebtoken'
 import { pool } from '../../db/pool.js'
 import { env } from '../../config/env.js'
 import { sendLoginOtp } from '../../services/otpEmail.js'
+import { isValidSapId, normalizeSapId } from '../../utils/sapId.js'
 
 const hashOtp = (otp) => createHash('sha256').update(otp).digest('hex')
-const normalizeSapId = (value) => String(value ?? '').trim().toUpperCase()
 
 export async function requestOtp(req, res, next) {
   const sapId = normalizeSapId(req.body?.sapId)
-  if (!sapId || sapId.length > 40) return res.status(400).json({ error: 'Enter a valid SAP ID' })
+  if (!isValidSapId(sapId)) return res.status(400).json({ error: 'SAP ID must be exactly 8 characters' })
   try {
     const { rows } = await pool.query(
       `SELECT user_id, email FROM users WHERE upper(sap_id) = $1 AND is_active = TRUE`, [sapId],
@@ -31,7 +31,7 @@ export async function requestOtp(req, res, next) {
 export async function verifyOtp(req, res, next) {
   const sapId = normalizeSapId(req.body?.sapId)
   const otp = String(req.body?.otp ?? '').trim()
-  if (!sapId || !/^\d{6}$/.test(otp)) return res.status(400).json({ error: 'Enter a valid SAP ID and six-digit code' })
+  if (!isValidSapId(sapId) || !/^\d{6}$/.test(otp)) return res.status(400).json({ error: 'Enter an 8-character SAP ID and six-digit code' })
   const client = await pool.connect()
   try {
     await client.query('BEGIN')

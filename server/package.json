@@ -7,7 +7,11 @@
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
     "db:create": "node src/db/createDatabase.js",
-    "db:migrate": "node src/db/migrate.js"
+    "db:migrate": "node src/db/migrate.js",
+    "db:seed:demo": "node scripts/seed-demo.js",
+    "admin:bootstrap": "node scripts/bootstrap-first-admin.js",
+    "test": "node --test",
+    "test:integration": "node scripts/run-postgres-integration.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

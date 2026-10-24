@@ -12,6 +12,7 @@ node_modules
 .env.*
 !.env.example
 .npm-cache/
+server/private-invoices/
 dist
 dist-ssr
 *.local
