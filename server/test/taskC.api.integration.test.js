@@ -73,7 +73,7 @@ test('reports paginate/filter and warn on duplicate typed HMAC without exposing 
       VALUES($1,$2,CURRENT_DATE,'Model',$3,'Windows',$4,$5,$6,$7) RETURNING request_id`, [employee.employeeId,`TC-${randomUUID()}`,randomUUID().replaceAll('-','').slice(0,12).toUpperCase(),Buffer.from('cipher'),Buffer.alloc(12,1),Buffer.alloc(16,2),hmac])
     ids.push(row.rows[0].request_id)
   }
-  const response = await api('/admin/reports?duplicateOnly=true&limit=1', admin)
+  const response = await api(`/admin/reports?duplicateOnly=true&sapId=${employee.sapId}&limit=1`, admin)
   assert.equal(response.status, 200)
   const page = await json(response)
   assert.equal(page.reports.length, 1); assert.equal(page.pagination.total, 2)
@@ -111,7 +111,7 @@ test('Admin Excel export applies filters, audits filters only, rejects other rol
   const storageKey = `EXPORT_STORAGE_CANARY_${randomUUID()}`
   const formulaSerial = '=1+1'
 
-  await pool.query("UPDATE employees SET employee_name=$1,designation=$2,department=$3 WHERE employee_id=$4", [
+  await pool.query("UPDATE employees SET employee_name=$1,designation=$2,department=$3,employee_category='JO' WHERE employee_id=$4", [
     'Komal Synthetic', '+Synthetic Export Tester', '@Export Test Department', employee.employeeId,
   ])
   const insertReportRequest = async ({ serial, model, mac, status, hmac }) => {
@@ -126,6 +126,7 @@ test('Admin Excel export applies filters, audits filters only, rejects other rol
   const matchingRequest = await insertReportRequest({
     serial: formulaSerial, model: '+SUM(1,1)', mac: '00AABBCCDDEE', status: 'PENDING_ENGINEER', hmac: matchingHmac,
   })
+  await pool.query('UPDATE laptop_requests SET ms_office_account_email=$1 WHERE request_id=$2', ['office.owner@example.invalid', matchingRequest])
   await insertReportRequest({
     serial: `FILTERED-STATUS-${randomUUID()}`, model: 'Status excluded', mac: '11AABBCCDDEE', status: 'NEEDS_EMPLOYEE_CORRECTION', hmac: matchingHmac,
   })
@@ -157,7 +158,7 @@ test('Admin Excel export applies filters, audits filters only, rejects other rol
   const sheet = files.get('xl/worksheets/sheet1.xml')
   assert.ok(sheet)
   assert.equal((sheet.match(/<row /g) ?? []).length, 2, 'headers plus exactly one matching report row')
-  for (const header of ['SAP ID','Employee Name','Designation','Category','Department','Serial Number','Model Number','MAC Address','Operating System','Purchase Date','Windows Key Provided','Windows Key Duplicate Check','MS Office Key Provided','MS Office Key Duplicate Check','Status','Latest Remarks','Created By','Updated By','Created Date','Updated Date']) {
+  for (const header of ['SAP ID','Employee Name','Designation','Category','Department','Serial Number','Model Number','MAC Address','Operating System','Purchase Date','Windows Key Provided','Windows Key Duplicate Check','MS Office Key Provided','MS Office Key Duplicate Check','Status','Latest Remarks','Created By','Updated By','Created Date','Updated Date','MS Office Account Email']) {
     assert.ok(sheet.includes(header), `missing export column ${header}`)
   }
   assert.ok(!sheet.includes('Legacy Key'), 'Legacy Key is omitted when none of the exported records has a legacy key')
@@ -168,6 +169,7 @@ test('Admin Excel export applies filters, audits filters only, rejects other rol
   assert.match(sheet, /<c r="F2" s="0" t="inlineStr">/, 'serial number is explicitly stored as text')
   assert.match(sheet, /<c r="H2" s="0" t="inlineStr">/, 'MAC cell is explicitly stored as text')
   assert.ok(sheet.includes('Pending Engineer'), 'status is human readable')
+  assert.ok(sheet.includes('JO (Junior Officer)'), 'JO category displays with its label')
   assert.ok(sheet.includes('Komal Synthetic (' + employee.sapId + ')'), 'creator name is looked up and paired with SAP ID')
   assert.ok(sheet.includes('Komal Synthetic (' + employee.sapId + ')'), 'updater name is looked up and paired with SAP ID')
   assert.ok(files.get('xl/worksheets/sheet1.xml').includes('state="frozen"'), 'header row is frozen')
@@ -180,6 +182,7 @@ test('Admin Excel export applies filters, audits filters only, rejects other rol
   assert.ok(sheet.includes('&apos;-Latest remark formula canary'))
   assert.ok(sheet.includes('Yes'))
   assert.ok(sheet.includes('Duplicate match'))
+  assert.ok(sheet.includes('office.owner@example.invalid'), 'Office account email is exported')
   const sheetText = Object.values(files).join('\n')
   for (const forbidden of [secretCiphertext.toString(), matchingHmac.toString(), storageKey, invoiceName, 'application/x-invoice-canary', '982451', 'EXPORT_SHA_CANARY']) {
     assert.equal(sheetText.includes(forbidden), false, `export leaked forbidden value ${forbidden}`)
@@ -228,27 +231,58 @@ test('Admin Excel export applies filters, audits filters only, rejects other rol
   assert.equal(auditDetails.includes(matchingRequest), false)
 })
 
-test('admin account changes are audited, employee profiles are created, engineer accounts avoid email fallback, and admin safeguards hold', { skip: !ready }, async () => {
+test('admin creates profiles for every role and can create or edit legacy profiles atomically with audit', { skip: !ready }, async () => {
   const first = await actor('admin'), second = await actor('admin')
   const invalidSapId = await api('/admin/accounts', first, 'POST', { sapId: 'TOOSHRT', email: 'invalid@example.invalid', role: 'engineer' })
   assert.equal(invalidSapId.status, 400)
   await pool.query("UPDATE users SET is_active=false WHERE role='admin' AND is_active=true AND user_id NOT IN ($1,$2)", [first.userId, second.userId])
   const employeeTag = randomUUID()
-  const created = await api('/admin/accounts', first, 'POST', { sapId: `NE${employeeTag.replaceAll('-', '').slice(0, 6).toUpperCase()}`, email: `${employeeTag}@example.invalid`, role: 'employee', employeeName: 'Synthetic New Employee', designation: 'Tester', employeeCategory: 'Workman', department: 'Integration' })
+  const created = await api('/admin/accounts', first, 'POST', { sapId: `NE${employeeTag.replaceAll('-', '').slice(0, 6).toUpperCase()}`, email: `${employeeTag}@example.invalid`, role: 'employee', employeeName: 'Synthetic New Employee', designation: 'Tester', employeeCategory: 'JO', department: 'Integration' })
   assert.equal(created.status, 201)
   const createdBody = await json(created)
   const profile = await pool.query('SELECT employee_id FROM employees WHERE user_id=$1', [createdBody.account.userId])
   assert.equal(profile.rowCount, 1)
+  assert.equal(createdBody.account.employeeCategory, 'JO')
   const engineerTag = randomUUID()
   const engineerCreated = await api('/admin/accounts', first, 'POST', {
     sapId: `NG${engineerTag.replaceAll('-', '').slice(0, 6).toUpperCase()}`, email: `${engineerTag}@example.invalid`, role: 'engineer',
+    employeeName: 'Synthetic Engineer', designation: 'Engineer', employeeCategory: 'Executive', department: 'Engineering',
   })
   assert.equal(engineerCreated.status, 201)
   const engineerAccount = (await json(engineerCreated)).account
   const listed = await api(`/admin/accounts?q=${engineerAccount.sapId}`, first)
   const engineerListed = (await json(listed)).accounts[0]
   assert.equal(engineerListed.sapId, engineerAccount.sapId)
-  assert.equal(engineerListed.employeeName, null)
+  assert.equal(engineerListed.employeeName, 'Synthetic Engineer')
+  const missingProfileTag = randomUUID()
+  const missingProfileUser = await pool.query(`INSERT INTO users(sap_id,email,role) VALUES($1,$2,'admin') RETURNING user_id,sap_id`, [
+    `LP${missingProfileTag.replaceAll('-', '').slice(0, 6).toUpperCase()}`, `${missingProfileTag}@example.invalid`,
+  ])
+  const profileValues = { employeeName: 'Synthetic Legacy Admin', designation: 'Administrator', employeeCategory: 'JO', department: 'Administration' }
+  const createdProfile = await api(`/admin/accounts/${missingProfileUser.rows[0].user_id}/profile`, first, 'PATCH', profileValues)
+  assert.equal(createdProfile.status, 200)
+  const createdProfileBody = await json(createdProfile)
+  assert.equal(createdProfileBody.account.employeeName, profileValues.employeeName)
+  assert.equal(createdProfileBody.account.employeeCategory, 'JO')
+  const updatedProfile = await api(`/admin/accounts/${missingProfileUser.rows[0].user_id}/profile`, first, 'PATCH', { ...profileValues, employeeName: 'Updated Synthetic Admin' })
+  assert.equal(updatedProfile.status, 200)
+  const engineerActor = await actor('engineer')
+  const forbiddenProfileEdit = await api(`/admin/accounts/${missingProfileUser.rows[0].user_id}/profile`, engineerActor, 'PATCH', profileValues)
+  assert.equal(forbiddenProfileEdit.status, 403)
+  const listedAdmin = await api(`/admin/accounts?q=${missingProfileUser.rows[0].sap_id}`, first)
+  const listedAdminBody = await json(listedAdmin)
+  assert.equal(listedAdminBody.accounts[0].employeeName, 'Updated Synthetic Admin')
+  assert.equal(listedAdminBody.accounts[0].employeeCategory, 'JO')
+  const profileRows = await pool.query('SELECT COUNT(*)::int AS count FROM employees WHERE user_id=$1', [missingProfileUser.rows[0].user_id])
+  assert.equal(profileRows.rows[0].count, 1)
+  const profileAudits = await pool.query(`SELECT action,details->'changedFields' AS changed_fields FROM audit_log WHERE entity_id=$1 ORDER BY audit_log_id`, [missingProfileUser.rows[0].user_id])
+  assert.deepEqual(profileAudits.rows.map((row) => row.action), ['account_profile_created', 'account_profile_updated'])
+  assert.deepEqual(profileAudits.rows[0].changed_fields, ['employeeName','designation','employeeCategory','department'])
+  await pool.query('UPDATE users SET is_active=false WHERE user_id=$1', [missingProfileUser.rows[0].user_id])
+  const missingFields = await api('/admin/accounts', first, 'POST', {
+    sapId: `MF${randomUUID().replaceAll('-', '').slice(0, 6).toUpperCase()}`, email: `${randomUUID()}@example.invalid`, role: 'admin',
+  })
+  assert.equal(missingFields.status, 400)
   const self = await api(`/admin/accounts/${first.userId}`, first, 'PATCH', { isActive: false })
   assert.equal(self.status, 409)
   const secondSelf = await api(`/admin/accounts/${second.userId}`, second, 'PATCH', { role: 'engineer' })
@@ -265,6 +299,51 @@ test('admin account changes are audited, employee profiles are created, engineer
   assert.ok(remaining.rows[0].n >= 1)
   const logs = await pool.query("SELECT COUNT(*)::int AS n FROM audit_log WHERE entity_type='user' AND entity_id=$1", [createdBody.account.userId])
   assert.equal(logs.rows[0].n, 1)
+  const adminTag = randomUUID()
+  const adminCreated = await api('/admin/accounts', first, 'POST', {
+    sapId: `NA${adminTag.replaceAll('-', '').slice(0, 6).toUpperCase()}`, email: `${adminTag}@example.invalid`, role: 'admin',
+    employeeName: 'Synthetic New Admin', designation: 'Administrator', employeeCategory: 'Executive', department: 'Administration',
+  })
+  assert.equal(adminCreated.status, 201)
+  const createdAdmin = (await json(adminCreated)).account
+  const adminProfile = await pool.query('SELECT employee_name FROM employees WHERE user_id=$1', [createdAdmin.userId])
+  assert.equal(adminProfile.rows[0].employee_name, 'Synthetic New Admin')
+})
+
+test('unique SAP ID and email conflicts return only their matching field errors', { skip: !ready }, async () => {
+  const admin = await actor('admin')
+  const tag = randomUUID()
+  const sapId = `UX${tag.replaceAll('-', '').slice(0, 6).toUpperCase()}`
+  const email = `unique-${tag}@example.invalid`
+  const accountData = (overrides = {}) => ({
+    sapId, email, role: 'employee', employeeName: 'Synthetic Unique Check',
+    designation: 'Tester', employeeCategory: 'Executive', department: 'Integration', ...overrides,
+  })
+  const created = await api('/admin/accounts', admin, 'POST', accountData())
+  assert.equal(created.status, 201)
+
+  const duplicateSapId = await api('/admin/accounts', admin, 'POST', accountData({ email: `new-${tag}@example.invalid` }))
+  assert.equal(duplicateSapId.status, 409)
+  const sapError = await json(duplicateSapId)
+  assert.equal(sapError.error, 'SAP ID already exists.')
+  assert.deepEqual(sapError.fieldErrors, { sapId: 'SAP ID already exists.' })
+  assert.equal(JSON.stringify(sapError).includes(email), false)
+
+  // The baseline schema has no unique email index. Add one only to this isolated
+  // test database to exercise the same PostgreSQL unique-violation path.
+  await pool.query('CREATE UNIQUE INDEX integration_test_users_email_unique_idx ON users (lower(email))')
+  try {
+    const duplicateEmail = await api('/admin/accounts', admin, 'POST', accountData({
+      sapId: `UE${tag.replaceAll('-', '').slice(0, 6).toUpperCase()}`,
+    }))
+    assert.equal(duplicateEmail.status, 409)
+    const emailError = await json(duplicateEmail)
+    assert.equal(emailError.error, 'Email address already exists.')
+    assert.deepEqual(emailError.fieldErrors, { email: 'Email address already exists.' })
+    assert.equal(JSON.stringify(emailError).includes(sapId), false)
+  } finally {
+    await pool.query('DROP INDEX IF EXISTS integration_test_users_email_unique_idx')
+  }
 })
 
 test('clearance API exposes exactly the two mandatory removal checks and blocks finalization until both are complete', { skip: !ready }, async () => {

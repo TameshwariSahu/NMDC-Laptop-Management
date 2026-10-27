@@ -50,21 +50,21 @@ async function createActor(role) {
   return result
 }
 
-async function createRequest(owner, { status = 'PENDING_ENGINEER', version = 1, hmac = null, windowsKey = null, operatingSystem = 'Windows' } = {}) {
+async function createRequest(owner, { status = 'PENDING_ENGINEER', version = 1, hmac = null, windowsKey = null, operatingSystem = 'Windows', registeredByUserId = null } = {}) {
   const tag = randomUUID()
   const mac = tag.replaceAll('-', '').slice(0, 12).toUpperCase()
   const result = await pool.query(
     `INSERT INTO laptop_requests
        (owner_employee_id, serial_number, purchase_date, model_number, mac_address,
         operating_system, status, version, license_key_hmac, windows_license_key_ciphertext,
-        windows_license_key_nonce, windows_license_key_auth_tag, windows_license_key_hmac)
+        windows_license_key_nonce, windows_license_key_auth_tag, windows_license_key_hmac, registered_by_user_id)
      VALUES ($1, $2, DATE '2025-01-10', 'Workflow Synthetic', $3, $4, $5, $6, $7,
        CASE WHEN $8::boolean THEN decode('01','hex') END,
        CASE WHEN $8::boolean THEN decode(repeat('01',12),'hex') END,
        CASE WHEN $8::boolean THEN decode(repeat('02',16),'hex') END,
-       CASE WHEN $8::boolean THEN decode(repeat('ab',32),'hex') END)
+        CASE WHEN $8::boolean THEN decode(repeat('ab',32),'hex') END, $9)
      RETURNING request_id, version`,
-    [owner.employeeId, `WF-SERIAL-${tag}`, mac, operatingSystem, status, version, hmac, Boolean(windowsKey)],
+    [owner.employeeId, `WF-SERIAL-${tag}`, mac, operatingSystem, status, version, hmac, Boolean(windowsKey), registeredByUserId],
   )
   return result.rows[0]
 }
@@ -83,6 +83,57 @@ async function api(pathname, token, { method = 'GET', body } = {}) {
 async function json(response) {
   return response.json()
 }
+
+test('registered Engineer cannot approve after correction; a different Engineer and then Admin complete both stages', { skip: !integrationReady }, async () => {
+  const employee = await createActor('employee')
+  const registeringEngineer = await createActor('engineer')
+  const reviewingEngineer = await createActor('engineer')
+  const admin = await createActor('admin')
+  const request = await createRequest(employee, {
+    status: 'NEEDS_ENGINEER_CORRECTION', registeredByUserId: registeringEngineer.userId,
+  })
+  const adminOnEngineerRoute = await api(`/engineer/requests/${request.request_id}/decision`, admin.token, {
+    method: 'POST', body: { action: 'approve', expectedVersion: 1 },
+  })
+  assert.equal(adminOnEngineerRoute.status, 403)
+  const adminAtWrongStatus = await api(`/admin/requests/${request.request_id}/decision`, admin.token, {
+    method: 'POST', body: { action: 'approve', expectedVersion: 1 },
+  })
+  assert.equal(adminAtWrongStatus.status, 409)
+
+  const correction = await api(`/engineer/requests/${request.request_id}/corrections`, registeringEngineer.token, {
+    method: 'POST', body: { expectedVersion: 1, modelNumber: 'Corrected after return' },
+  })
+  assert.equal(correction.status, 200)
+  const selfApproval = await api(`/engineer/requests/${request.request_id}/decision`, registeringEngineer.token, {
+    method: 'POST', body: { action: 'approve', expectedVersion: 2 },
+  })
+  assert.equal(selfApproval.status, 403)
+
+  const approval = await api(`/engineer/requests/${request.request_id}/decision`, reviewingEngineer.token, {
+    method: 'POST', body: { action: 'approve', expectedVersion: 2 },
+  })
+  assert.equal(approval.status, 200)
+  assert.equal((await json(approval)).request.status, 'PENDING_ADMIN')
+  const final = await api(`/admin/requests/${request.request_id}/decision`, admin.token, {
+    method: 'POST', body: { action: 'approve', expectedVersion: 3 },
+  })
+  assert.equal(final.status, 200)
+  assert.equal((await json(final)).request.status, 'APPROVED')
+  const stages = await pool.query(`SELECT action FROM approval_history WHERE request_id=$1
+    AND action IN ('ENGINEER_APPROVED','ADMIN_APPROVED') ORDER BY created_at`, [request.request_id])
+  assert.deepEqual(stages.rows.map((row) => row.action), ['ENGINEER_APPROVED', 'ADMIN_APPROVED'])
+
+  const forgedStage = await createRequest(employee, { status: 'PENDING_ADMIN' })
+  const skipped = await api(`/admin/requests/${forgedStage.request_id}/decision`, admin.token, {
+    method: 'POST', body: { action: 'approve', expectedVersion: 1 },
+  })
+  assert.equal(skipped.status, 409)
+  assert.equal((await json(skipped)).error, 'Engineer approval is required before final approval')
+  const unchanged = await pool.query('SELECT status FROM laptop_requests WHERE request_id=$1', [forgedStage.request_id])
+  assert.equal(unchanged.rows[0].status, 'PENDING_ADMIN')
+  await pool.query("UPDATE laptop_requests SET status='NEEDS_ENGINEER_CORRECTION' WHERE request_id=$1", [forgedStage.request_id])
+})
 
 test('engineer and admin queues are status-filtered, paginated, and details hide license material', { skip: !integrationReady }, async () => {
   const employee = await createActor('employee')
@@ -240,6 +291,7 @@ test('MAC uniqueness treats colon and colonless input as the same value', { skip
     method: 'PATCH', body: { expectedVersion: 1, macAddress: colonMac, remarks: 'Duplicate synthetic address' },
   })
   assert.equal(duplicate.status, 409)
+  assert.deepEqual((await json(duplicate)).fieldErrors, { macAddress: 'MAC address already exists.' })
 })
 
 test('employee correction checks ownership and version, re-encrypts changed keys, and records the transition atomically', { skip: !integrationReady }, async () => {
@@ -270,7 +322,7 @@ test('employee correction checks ownership and version, re-encrypts changed keys
   const corrected = await api(`/employee/requests/${employee.request_id}/corrections`, owner.token, {
     method: 'POST', body: {
       expectedVersion: 1, serialNumber: 'CORRECTED-SERIAL', modelNumber: 'Corrected synthetic model',
-      windowsKey: 'SYNTHETIC-KEY-DO-NOT-LOG', remarks: 'Updated requested details',
+      windowsKey: 'ABCDE-12345-FGHIJ-67890-KLMNO', remarks: 'Updated requested details',
     },
   })
   assert.equal(corrected.status, 200)
@@ -306,11 +358,11 @@ test('engineer edits permitted fields only in PENDING_ENGINEER and increments ve
   })
   assert.equal(missingRemarks.status, 400)
 
-  const syntheticKey = 'SYNTHETIC-EDIT-KEY-DO-NOT-LOG'
+  const syntheticKey = 'ZYXWV-09876-UTSRQ-54321-ONMLK'
   const edited = await api(`/engineer/requests/${request.request_id}`, engineer.token, {
     method: 'PATCH', body: {
       expectedVersion: 1, modelNumber: 'Engineer edited synthetic model',
-      officeKey: syntheticKey, remarks: 'Corrected the synthetic model details',
+      officeKey: syntheticKey, msOfficeAccountEmail: 'office.owner@example.invalid', remarks: 'Corrected the synthetic model details',
     },
   })
   assert.equal(edited.status, 200)
@@ -322,7 +374,7 @@ test('engineer edits permitted fields only in PENDING_ENGINEER and increments ve
     [request.request_id],
   )
   assert.equal(editAudit.rowCount, 1)
-  assert.deepEqual(editAudit.rows[0].details.changedFields.sort(), ['modelNumber', 'officeKey'])
+  assert.deepEqual(editAudit.rows[0].details.changedFields.sort(), ['modelNumber', 'msOfficeAccountEmail', 'officeKey'])
   assert.equal(editAudit.rows[0].details.remarks, 'Corrected the synthetic model details')
   assert.equal(JSON.stringify(editAudit.rows[0].details).includes(syntheticKey), false)
 
@@ -355,7 +407,7 @@ test('typed keys enforce OS rules and changing Windows to macOS is blocked while
   const employee = await createActor('employee'), engineer = await createActor('engineer')
   const macRequest = await createRequest(employee, { operatingSystem: 'macOS' })
   const windowsOnMac = await api(`/engineer/requests/${macRequest.request_id}`, engineer.token, {
-    method: 'PATCH', body: { expectedVersion: 1, windowsKey: 'SYNTHETIC-WIN', remarks: 'Test OS validation' },
+    method: 'PATCH', body: { expectedVersion: 1, windowsKey: 'ABCDE12345FGHIJ67890KLMNO', remarks: 'Test OS validation' },
   })
   assert.equal(windowsOnMac.status, 400)
   const keyedWindowsRequest = await createRequest(employee, { windowsKey: true })
@@ -364,6 +416,52 @@ test('typed keys enforce OS rules and changing Windows to macOS is blocked while
   })
   assert.equal(changeOs.status, 409)
   assert.match((await json(changeOs)).error, /Remove the existing Windows key/)
+})
+
+test('Engineer edits reject malformed keys and normalize dash variants before HMAC fingerprinting', { skip: !integrationReady }, async () => {
+  const employee = await createActor('employee'), engineer = await createActor('engineer')
+  const first = await createRequest(employee), second = await createRequest(employee)
+  const invalid = await api(`/engineer/requests/${first.request_id}`, engineer.token, {
+    method: 'PATCH', body: { expectedVersion: 1, windowsKey: 'ABCDE_12345_FGHIJ_67890_KLMNO', remarks: 'Reject invalid key' },
+  })
+  assert.equal(invalid.status, 400)
+  assert.equal((await json(invalid)).error, 'Invalid Windows key.')
+  const invalidOffice = await api(`/engineer/requests/${first.request_id}`, engineer.token, {
+    method: 'PATCH', body: { expectedVersion: 1, officeKey: 'ABCDE_12345_FGHIJ_67890_KLMNO', remarks: 'Reject invalid Office key' },
+  })
+  assert.equal(invalidOffice.status, 400)
+  assert.equal((await json(invalidOffice)).error, 'Invalid MS Office key.')
+  const grouped = await api(`/engineer/requests/${first.request_id}`, engineer.token, {
+    method: 'PATCH', body: { expectedVersion: 1, windowsKey: 'abcde-12345-fghij-67890-klmno', remarks: 'Save grouped key' },
+  })
+  const plain = await api(`/engineer/requests/${second.request_id}`, engineer.token, {
+    method: 'PATCH', body: { expectedVersion: 1, windowsKey: 'ABCDE12345FGHIJ67890KLMNO', remarks: 'Save plain key' },
+  })
+  assert.equal(grouped.status, 200)
+  assert.equal(plain.status, 200)
+  const stored = await pool.query('SELECT windows_license_key_hmac FROM laptop_requests WHERE request_id=ANY($1::uuid[])', [[first.request_id, second.request_id]])
+  assert.equal(stored.rowCount, 2)
+  assert.deepEqual(stored.rows[0].windows_license_key_hmac, stored.rows[1].windows_license_key_hmac)
+})
+
+test('Engineer key edits require and normalize the MS Office account email', { skip: !integrationReady }, async () => {
+  const employee = await createActor('employee'), engineer = await createActor('engineer')
+  const request = await createRequest(employee)
+  const missingEmail = await api(`/engineer/requests/${request.request_id}`, engineer.token, {
+    method: 'PATCH', body: { expectedVersion: 1, officeKey: 'ABCDE12345FGHIJ67890KLMNO', remarks: 'Set Office key' },
+  })
+  assert.equal(missingEmail.status, 400)
+  assert.equal((await json(missingEmail)).error, 'MS Office account email is required when an MS Office key is entered.')
+  const invalidEmail = await api(`/engineer/requests/${request.request_id}`, engineer.token, {
+    method: 'PATCH', body: { expectedVersion: 1, officeKey: 'ABCDE12345FGHIJ67890KLMNO', msOfficeAccountEmail: 'bad-email', remarks: 'Set Office key' },
+  })
+  assert.equal(invalidEmail.status, 400)
+  const saved = await api(`/engineer/requests/${request.request_id}`, engineer.token, {
+    method: 'PATCH', body: { expectedVersion: 1, officeKey: 'ABCDE12345FGHIJ67890KLMNO', msOfficeAccountEmail: '  Person.Name@Example.COM ', remarks: 'Set Office key and account' },
+  })
+  assert.equal(saved.status, 200)
+  const row = await pool.query('SELECT ms_office_account_email FROM laptop_requests WHERE request_id=$1', [request.request_id])
+  assert.equal(row.rows[0].ms_office_account_email, 'person.name@example.com')
 })
 
 test('laptop request actor columns are set from app.actor_sap_id on create and update', { skip: !integrationReady }, async () => {

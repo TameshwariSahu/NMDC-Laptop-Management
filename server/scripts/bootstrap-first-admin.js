@@ -31,7 +31,7 @@ function validate(input) {
   if (!value.name || value.name.length > 160) throw new Error('Name is required and must be at most 160 characters')
   if (!/^\S+@\S+\.\S+$/.test(value.email) || value.email.length > 254) throw new Error('A valid email is required')
   if (!value.designation || value.designation.length > 120) throw new Error('Designation is required and must be at most 120 characters')
-  if (!['Workman', 'Executive'].includes(value.employeeCategory)) throw new Error('Employee category must be Workman or Executive')
+  if (!['Workman', 'Executive', 'JO'].includes(value.employeeCategory)) throw new Error('Employee category must be Workman, Executive or JO')
   if (!value.department || value.department.length > 120) throw new Error('Department is required and must be at most 120 characters')
   return value
 }
@@ -47,12 +47,9 @@ export async function bootstrapFirstAdmin(input, databasePool = pool) {
     const existing = await client.query("SELECT 1 FROM users WHERE role='admin' AND is_active=TRUE LIMIT 1")
     if (existing.rowCount) throw new Error('An active Admin already exists; bootstrap refused')
 
-    // Migration 001 requires employee profiles to be inserted while the linked
-    // user has the employee role. The promotion remains uncommitted until all
-    // three records (user, profile, audit event) are ready.
     const created = await client.query(
       `INSERT INTO users (sap_id, email, role, is_active)
-       VALUES ($1, $2, 'employee', TRUE) RETURNING user_id`,
+       VALUES ($1, $2, 'admin', TRUE) RETURNING user_id`,
       [value.sapId, value.email],
     )
     const userId = created.rows[0].user_id
@@ -62,11 +59,10 @@ export async function bootstrapFirstAdmin(input, databasePool = pool) {
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [userId, value.sapId, value.name, value.email, value.designation, value.employeeCategory, value.department],
     )
-    await client.query("UPDATE users SET role='admin', updated_at=NOW() WHERE user_id=$1", [userId])
     await client.query(
       `INSERT INTO audit_log (actor_user_id, actor_sap_id, action, entity_type, entity_id, details)
        VALUES (NULL, 'BOOTSTRAP', 'first_admin_created', 'user', $1, $2::jsonb)`,
-      [userId, JSON.stringify({ role: 'admin', changedFields: ['sapId', 'email', 'employeeProfile', 'role'] })],
+      [userId, JSON.stringify({ role: 'admin', changedFields: ['sapId', 'email', 'employeeProfile'] })],
     )
     await client.query('COMMIT')
     return true

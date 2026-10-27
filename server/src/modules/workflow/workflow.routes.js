@@ -1,6 +1,10 @@
 import { Router, raw } from 'express'
 import { requireDatabaseRole } from '../../middleware/databaseAuth.js'
-import { uploadRequestInvoice } from '../laptopRequests/laptopRequests.controller.js'
+import {
+  registerLaptopOnBehalf,
+  searchEmployeeForEngineer,
+  uploadRequestInvoice,
+} from '../laptopRequests/laptopRequests.controller.js'
 import {
   decideRequest,
   downloadInvoice,
@@ -17,6 +21,11 @@ const reviewerOrOwner = requireDatabaseRole('employee', 'engineer', 'admin')
 const employeeOrEngineer = requireDatabaseRole('employee', 'engineer')
 
 router.get('/api/engineer/requests', ...engineerOnly, listWorkflowQueue)
+router.get('/api/engineer/employees/search', ...engineerOnly, searchEmployeeForEngineer)
+router.post('/api/engineer/requests/register', ...engineerOnly, (req, res, next) => {
+  if (!req.is('multipart/form-data')) return res.status(415).json({ error: 'Use multipart/form-data and include an invoice' })
+  return next()
+}, raw({ type: 'multipart/form-data', limit: '6mb' }), registerLaptopOnBehalf)
 router.get('/api/engineer/requests/:requestId', ...engineerOnly, getWorkflowRequest)
 router.patch('/api/engineer/requests/:requestId', ...engineerOnly, editEngineerRequest)
 router.post('/api/engineer/requests/:requestId/decision', ...engineerOnly, decideRequest)

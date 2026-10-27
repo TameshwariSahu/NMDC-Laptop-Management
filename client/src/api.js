@@ -17,7 +17,11 @@ export async function apiFetch(path, options = {}) {
     body: options.body && !(options.body instanceof FormData) ? JSON.stringify(options.body) : options.body,
   })
   const data = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(data.error || data.message || 'The request could not be completed')
+  if (!response.ok) {
+    const error = new Error(data.error || data.message || 'The request could not be completed')
+    error.fieldErrors = data.fieldErrors && typeof data.fieldErrors === 'object' ? data.fieldErrors : {}
+    throw error
+  }
   return data
 }
 

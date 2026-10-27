@@ -11,6 +11,7 @@ const columns = [
   ['Status', 'status', 30], ['Latest Remarks', 'latestRemarks', 42],
   ['Created By', 'createdBy', 30], ['Updated By', 'updatedBy', 30],
   ['Created Date', 'createdAt', 17], ['Updated Date', 'updatedAt', 17],
+  ['MS Office Account Email', 'msOfficeAccountEmail', 34],
 ]
 
 const crcTable = new Uint32Array(256)
@@ -73,6 +74,7 @@ function cellValue(row, field) {
     PENDING_ENGINEER: 'Pending Engineer', NEEDS_EMPLOYEE_CORRECTION: 'Needs Employee Correction',
     PENDING_ADMIN: 'Pending Admin', NEEDS_ENGINEER_CORRECTION: 'Needs Engineer Correction', APPROVED: 'Approved',
   })[row.status] ?? row.status ?? ''
+  if (field === 'category') return row.category === 'JO' ? 'JO (Junior Officer)' : row.category ?? ''
   return row[field] ?? ''
 }
 

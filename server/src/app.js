@@ -8,6 +8,7 @@ import workflowRoutes from './modules/workflow/workflow.routes.js'
 import adminRoutes from './modules/admin/admin.routes.js'
 import { listReports } from './modules/reports/reports.controller.js'
 import { requireDatabaseRole } from './middleware/databaseAuth.js'
+import { getUniqueViolationField } from './utils/uniqueViolation.js'
 
 export const app = express()
 app.use(helmet())
@@ -24,7 +25,12 @@ app.use((req, res) => res.status(404).json({ error: `Route not found: ${req.meth
 app.use((error, _req, res, _next) => {
   if (error.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON request body' })
   if (error.type === 'entity.too.large') return res.status(413).json({ error: 'Request body exceeds the allowed size' })
-  if (error.code === '23505') return res.status(409).json({ error: 'A record with a conflicting unique value already exists' })
+  const uniqueField = getUniqueViolationField(error)
+  if (uniqueField) return res.status(409).json({
+    error: uniqueField.message,
+    fieldErrors: { [uniqueField.field]: uniqueField.message },
+  })
+  if (error.code === '23505') return res.status(409).json({ error: 'A unique value conflicts with an existing record.' })
   if (Number.isInteger(error.status) && error.status >= 400 && error.status < 500) {
     return res.status(error.status).json({ error: error.message })
   }

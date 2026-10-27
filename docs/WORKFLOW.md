@@ -28,6 +28,14 @@ Key rules:
   the database row in the same transaction; after commit, the old private file
   is deleted. Only the current invoice is available to any role.
 - Only Engineer approval can move a request to PENDING_ADMIN.
+- A request may reach APPROVED only after ENGINEER_APPROVED and
+  ADMIN_APPROVED events are both present in approval_history. Admins cannot
+  perform the Engineer review stage.
+- Engineers may register a request for an active employee after searching by
+  SAP ID. The employee remains the owner. The Engineer is recorded as creator
+  and in registered_by_user_id, and a registered_on_behalf audit event is
+  written. That Engineer cannot approve the request, even after corrections;
+  another Engineer must approve it.
 - APPROVED locks ordinary edits. Exceptional changes need an authorized,
   audited process (to be defined).
 - Engineer edits to permitted laptop fields while `PENDING_ENGINEER` require
@@ -43,6 +51,9 @@ Key rules:
   are encrypted separately and duplicate checks compare Windows with Windows
   and Office with Office. New requests do not write the old generic key
   columns; existing values in those columns appear only as `Legacy key`.
+- MS Office account email is optional when there is no MS Office key. When an
+  MS Office key is entered, the email is required, validated, trimmed and
+  stored in lowercase.
 - Retirement clearance requires a reason (Retirement, Transfer, or
   Resignation) at creation and before final approval.
 - Laptop requests record the acting user's SAP ID as creator and last updater

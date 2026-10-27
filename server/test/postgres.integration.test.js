@@ -44,6 +44,9 @@ test('migration runner baselines an existing 001 schema on PostgreSQL', { skip: 
   const clearanceReasonSql = await readFile(path.join(migrationsDirectory, '008_retirement_clearance_reason.sql'), 'utf8')
   const typedKeysSql = await readFile(path.join(migrationsDirectory, '009_typed_license_keys.sql'), 'utf8')
   const requestActorsSql = await readFile(path.join(migrationsDirectory, '010_laptop_request_actor_sap_ids.sql'), 'utf8')
+  const allRoleProfilesSql = await readFile(path.join(migrationsDirectory, '011_profiles_for_all_roles.sql'), 'utf8')
+  const juniorOfficerSql = await readFile(path.join(migrationsDirectory, '012_employee_category_jo.sql'), 'utf8')
+  const onBehalfSql = await readFile(path.join(migrationsDirectory, '013_office_account_email_and_on_behalf.sql'), 'utf8')
   const executedSql = []
   const tracedPool = {
     async connect() {
@@ -71,9 +74,39 @@ test('migration runner baselines an existing 001 schema on PostgreSQL', { skip: 
   assert.equal(executedSql.some((sql) => sql.trim() === clearanceReasonSql.trim()), true)
   assert.equal(executedSql.some((sql) => sql.trim() === typedKeysSql.trim()), true)
   assert.equal(executedSql.some((sql) => sql.trim() === requestActorsSql.trim()), true)
+  assert.equal(executedSql.some((sql) => sql.trim() === allRoleProfilesSql.trim()), true)
+  assert.equal(executedSql.some((sql) => sql.trim() === juniorOfficerSql.trim()), true)
+  assert.equal(executedSql.some((sql) => sql.trim() === onBehalfSql.trim()), true)
 
   const rows = await baselinePool.query('SELECT version FROM schema_migrations ORDER BY version')
-  assert.deepEqual(rows.rows.map((row) => row.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010'])
+  assert.deepEqual(rows.rows.map((row) => row.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013'])
+})
+
+test('migration 012 adds JO as a usable employee category after the migration commits', { skip: !ready }, async () => {
+  const value = await testPool.query("SELECT 'JO'::employee_category AS category")
+  assert.equal(value.rows[0].category, 'JO')
+  const enumValues = await testPool.query(`SELECT enumlabel FROM pg_enum e JOIN pg_type t ON t.oid=e.enumtypid
+    WHERE t.typname='employee_category' ORDER BY e.enumsortorder`)
+  assert.deepEqual(enumValues.rows.map((row) => row.enumlabel), ['Workman', 'Executive', 'JO'])
+})
+
+test('migration 011 accepts one synced profile for each user role while preserving one-profile-per-user', { skip: !ready }, async () => {
+  await withRollbackTransaction(async (client) => {
+    for (const role of ['employee', 'engineer', 'admin']) {
+      const tag = crypto.randomUUID()
+      const sapId = `PR${tag.replaceAll('-', '').slice(0, 6).toUpperCase()}`
+      const user = await client.query('INSERT INTO users(sap_id,email,role) VALUES($1,$2,$3) RETURNING user_id', [sapId, `${tag}@example.invalid`, role])
+      await client.query(`INSERT INTO employees(user_id,sap_id,employee_name,email,designation,employee_category,department)
+        VALUES($1,$2,'Synthetic Profile',$3,'Tester','Executive','Integration')`, [user.rows[0].user_id, sapId, `${tag}@example.invalid`])
+      const synced = await client.query('SELECT sap_id,email FROM users WHERE user_id=$1', [user.rows[0].user_id])
+      assert.equal(synced.rows[0].sap_id, sapId)
+      await client.query('SAVEPOINT duplicate_profile')
+      await assert.rejects(client.query(`INSERT INTO employees(user_id,sap_id,employee_name,email,designation,employee_category,department)
+        VALUES($1,$2,'Duplicate Profile',$3,'Tester','Executive','Integration')`, [user.rows[0].user_id, sapId, `${tag}@example.invalid`]), (error) => error.code === '23505')
+      await client.query('ROLLBACK TO SAVEPOINT duplicate_profile')
+      await client.query('RELEASE SAVEPOINT duplicate_profile')
+    }
+  })
 })
 
 test('migration 007 normalizes an APPROVED colon-MAC request, restores its lock trigger, and writes SYSTEM audit', { skip: !migration007Ready }, async () => {

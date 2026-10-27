@@ -1,5 +1,7 @@
 import { apiBlob, apiFetch } from '../api.js'
 import { normalizeMacAddress } from '../utils/macAddress.js'
+import { normalizeLicenseKey } from '../utils/licenseKey.js'
+import { normalizeEmail } from '../utils/email.js'
 
 function normalizeRequest(row) {
   const history = row.history ?? []
@@ -12,6 +14,8 @@ function normalizeRequest(row) {
     modelNumber: row.modelNumber ?? row.model_number,
     macAddress: row.macAddress ?? row.mac_address,
     operatingSystem: row.operatingSystem ?? row.operating_system,
+    msOfficeAccountEmail: row.msOfficeAccountEmail ?? row.ms_office_account_email ?? null,
+    registeredByUserId: row.registeredByUserId ?? row.registered_by_user_id ?? null,
     invoiceName: invoices.at(-1)?.originalName ?? '',
     duplicateKeyWarning: Boolean(row.duplicateLicenseWarning || row.windowsKeyDuplicateWarning || row.officeKeyDuplicateWarning),
     remarks: history.filter((item) => item.remarks).map((item) => ({
@@ -23,17 +27,26 @@ function normalizeRequest(row) {
 }
 
 function correctionFields(form) {
+  const msOfficeAccountEmail = normalizeEmail(form.msOfficeAccountEmail)
+  if (msOfficeAccountEmail === false) throw new Error('Enter a valid MS Office account email.')
   const body = {
     serialNumber: form.serialNumber,
     purchaseDate: form.purchaseDate,
     modelNumber: form.modelNumber,
     macAddress: normalizeMacAddress(form.macAddress) ?? form.macAddress,
     operatingSystem: form.operatingSystem,
+    msOfficeAccountEmail: msOfficeAccountEmail ?? '',
   }
   if (form.clearWindowsKey) body.windowsKey = null
-  else if (form.windowsKey?.trim()) body.windowsKey = form.windowsKey.trim()
+  else if (form.windowsKey) {
+    body.windowsKey = normalizeLicenseKey(form.windowsKey)
+    if (!body.windowsKey) throw new Error('Invalid Windows key.')
+  }
   if (form.clearOfficeKey) body.officeKey = null
-  else if (form.officeKey?.trim()) body.officeKey = form.officeKey.trim()
+  else if (form.officeKey) {
+    body.officeKey = normalizeLicenseKey(form.officeKey)
+    if (!body.officeKey) throw new Error('Invalid MS Office key.')
+  }
   return body
 }
 
@@ -66,6 +79,21 @@ export const laptopApi = {
     }
     const result = await apiFetch(`/${role}/requests?limit=${limit}&offset=${offset}`)
     return { ...result, requests: result.requests.map(normalizeRequest) }
+  },
+
+  async searchEmployeeBySapId(sapId) {
+    const result = await apiFetch(`/engineer/employees/search?sapId=${encodeURIComponent(sapId)}`)
+    return result.employee
+  },
+
+  async registerLaptopOnBehalf(sapId, form) {
+    const body = new FormData()
+    body.set('employeeSapId', sapId)
+    for (const [key, value] of Object.entries(correctionFields(form))) body.set(key, value)
+    if (!form.invoice) throw new Error('Attach the purchase invoice before submitting')
+    body.set('invoice', form.invoice)
+    const result = await apiFetch('/engineer/requests/register', { method: 'POST', body })
+    return normalizeRequest(result.request)
   },
 
   async saveRequest(_user, form, id = null, currentRequest = null) {

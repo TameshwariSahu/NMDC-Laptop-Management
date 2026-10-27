@@ -4,6 +4,7 @@ import AppShell from './components/AppShell.jsx'
 import LoginPage from './pages/LoginPage.jsx'
 import EmployeePage from './pages/EmployeePage.jsx'
 import ReviewQueuePage from './pages/ReviewQueuePage.jsx'
+import EngineerRegisterPage from './pages/EngineerRegisterPage.jsx'
 import ReportsPage from './pages/ReportsPage.jsx'
 import { AccountsPage, ClearancePage } from './pages/AdminPages.jsx'
 
@@ -29,6 +30,7 @@ export default function App() {
       <Route element={<AppShell />}>
         <Route path="/employee" element={<RoleGate roles={['employee']}><EmployeePage /></RoleGate>} />
         <Route path="/engineer" element={<RoleGate roles={['engineer']}><ReviewQueuePage mode="engineer" /></RoleGate>} />
+        <Route path="/engineer/register" element={<RoleGate roles={['engineer']}><EngineerRegisterPage /></RoleGate>} />
         <Route path="/admin" element={<RoleGate roles={['admin']}><ReviewQueuePage mode="admin" /></RoleGate>} />
         <Route path="/admin/accounts" element={<RoleGate roles={['admin']}><AccountsPage /></RoleGate>} />
         <Route path="/admin/clearance" element={<RoleGate roles={['admin']}><ClearancePage /></RoleGate>} />

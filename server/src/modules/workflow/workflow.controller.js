@@ -3,6 +3,8 @@ import path from 'node:path'
 import { pool } from '../../db/pool.js'
 import { encryptLicenseKey, invoiceStorageDirectory } from '../laptopRequests/laptopRequests.controller.js'
 import { normalizeMacAddress } from '../../utils/macAddress.js'
+import { normalizeLicenseKey } from '../../utils/licenseKey.js'
+import { normalizeEmail } from '../../utils/email.js'
 
 const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const FIELD_COLUMNS = Object.freeze({
@@ -11,6 +13,7 @@ const FIELD_COLUMNS = Object.freeze({
   modelNumber: 'model_number',
   macAddress: 'mac_address',
   operatingSystem: 'operating_system',
+  msOfficeAccountEmail: 'ms_office_account_email',
 })
 
 function httpError(status, message) {
@@ -41,6 +44,17 @@ function validatePatch(body, { allowRemarks = false } = {}) {
   for (const [field, column] of Object.entries(FIELD_COLUMNS)) {
     if (!Object.hasOwn(body, field)) continue
     const value = typeof body[field] === 'string' ? body[field].trim() : ''
+    if (field === 'msOfficeAccountEmail') {
+      if (body[field] !== null && typeof body[field] !== 'string') {
+        throw httpError(400, 'MS Office account email must be text or null')
+      }
+      const normalized = normalizeEmail(value)
+      if (normalized === false) {
+        throw httpError(400, 'Enter a valid MS Office account email.')
+      }
+      patch[field] = { column, value: normalized }
+      continue
+    }
     if (field === 'serialNumber' && (!value || value.length > 255)) throw httpError(400, 'Serial number is required and must be at most 255 characters')
     if (field === 'purchaseDate' && (!/^\d{4}-\d{2}-\d{2}$/.test(value)
         || Number.isNaN(Date.parse(`${value}T00:00:00Z`))
@@ -56,9 +70,12 @@ function validatePatch(body, { allowRemarks = false } = {}) {
     if (!Object.hasOwn(body, field)) continue
     const value = body[field]
     if (value !== null && typeof value !== 'string') throw httpError(400, `${field} must be text or null`)
-    const text = typeof value === 'string' ? value.trim() : ''
-    if (text.length > 512) throw httpError(400, 'License keys must be at most 512 characters')
+    const text = normalizeLicenseKey(value)
+    if (text === null) throw httpError(400, `Invalid ${field === 'officeKey' ? 'MS Office' : 'Windows'} key.`)
     if (field === 'windowsKey' && body.operatingSystem === 'macOS' && text) throw httpError(400, 'A Windows key cannot be used with macOS')
+    if (field === 'officeKey' && text && !String(body.msOfficeAccountEmail ?? '').trim()) {
+      throw httpError(400, 'MS Office account email is required when an MS Office key is entered.')
+    }
     const encrypted = encryptLicenseKey(text, keyType)
     patch[field] = {
       columns: [`${prefix}_ciphertext`, `${prefix}_nonce`, `${prefix}_auth_tag`, `${prefix}_hmac`],
@@ -74,7 +91,9 @@ function validatePatch(body, { allowRemarks = false } = {}) {
 async function lockRequest(client, requestId, req, expectedVersion) {
   const result = await client.query(
     `SELECT request_id, owner_employee_id, status, version, operating_system,
-       (windows_license_key_ciphertext IS NOT NULL) AS windows_key_present
+       ms_office_account_email, registered_by_user_id,
+       (windows_license_key_ciphertext IS NOT NULL) AS windows_key_present,
+       (office_license_key_ciphertext IS NOT NULL) AS office_key_present
      FROM laptop_requests WHERE request_id = $1 FOR UPDATE`,
     [requestId],
   )
@@ -95,6 +114,18 @@ function validateOperatingSystemChange(request, patch) {
       && targetOperatingSystem === 'macOS'
       && request.windows_key_present) {
     throw httpError(409, 'Remove the existing Windows key before changing the operating system to macOS')
+  }
+}
+
+function validateOfficeEmailChange(request, patch) {
+  const replacingOfficeKey = Boolean(patch.officeKey?.values?.[0])
+  const clearingOfficeKey = patch.officeKey && !patch.officeKey.values[0]
+  const clearsEmail = Object.hasOwn(patch, 'msOfficeAccountEmail') && !patch.msOfficeAccountEmail.value
+  if (replacingOfficeKey && !patch.msOfficeAccountEmail?.value) {
+    throw httpError(400, 'MS Office account email is required when an MS Office key is entered.')
+  }
+  if (request.ms_office_account_email && clearsEmail && !clearingOfficeKey) {
+    throw httpError(400, 'Remove the MS Office key before clearing its account email.')
   }
 }
 
@@ -169,6 +200,11 @@ function requestProjection() {
   r.serial_number AS "serialNumber", r.purchase_date AS "purchaseDate",
   r.model_number AS "modelNumber", r.mac_address AS "macAddress",
   r.operating_system AS "operatingSystem", r.status, r.version,
+  r.ms_office_account_email AS "msOfficeAccountEmail",
+  r.created_by_sap_id AS "createdBySapId",
+  (SELECT creator.employee_name FROM employees creator
+   WHERE upper(creator.sap_id) = upper(r.created_by_sap_id) LIMIT 1) AS "createdByName",
+  r.registered_by_user_id AS "registeredByUserId",
   r.created_at AS "createdAt", r.updated_at AS "updatedAt",
   (r.license_key_ciphertext IS NOT NULL) AS "legacyKeyPresent",
   (r.windows_license_key_ciphertext IS NOT NULL) AS "windowsKeyPresent",
@@ -255,6 +291,7 @@ export async function editEngineerRequest(req, res, next) {
     const request = await lockRequest(client, requestId, req, expectedVersion)
     if (request.status !== 'PENDING_ENGINEER') throw httpError(409, 'Engineer edits are allowed only while PENDING_ENGINEER')
     validateOperatingSystemChange(request, patch)
+    validateOfficeEmailChange(request, patch)
     const update = buildUpdate(patch, requestId, expectedVersion)
     const updated = await client.query(update.sql, update.values)
     await addEditAudit(client, req, {
@@ -283,6 +320,7 @@ export async function submitCorrection(req, res, next) {
       || (request.status === 'NEEDS_ENGINEER_CORRECTION' && ['employee', 'engineer'].includes(req.currentUser.role))
     if (!permitted) throw httpError(409, 'Correction is not allowed for this role and request status')
     validateOperatingSystemChange(request, patch)
+    validateOfficeEmailChange(request, patch)
     if (request.status === 'NEEDS_EMPLOYEE_CORRECTION') {
       const invoiceResult = await client.query(
         `SELECT EXISTS (
@@ -345,6 +383,20 @@ export async function decideRequest(req, res, next) {
     await setRequestActor(client, req)
     const request = await lockRequest(client, requestId, req, expectedVersion)
     if (request.status !== transition.oldStatus) throw httpError(409, 'This decision is not allowed for the current request status')
+    if (req.currentUser.role === 'engineer' && actionInput === 'approve'
+        && request.registered_by_user_id === req.currentUser.userId) {
+      throw httpError(403, 'The registering Engineer cannot approve this request')
+    }
+    if (req.currentUser.role === 'admin' && actionInput === 'approve') {
+      const engineerApproval = await client.query(
+        `SELECT EXISTS (SELECT 1 FROM approval_history
+         WHERE request_id = $1 AND action = 'ENGINEER_APPROVED') AS approved`,
+        [requestId],
+      )
+      if (!engineerApproval.rows[0].approved) {
+        throw httpError(409, 'Engineer approval is required before final approval')
+      }
+    }
     const update = buildUpdate({}, requestId, expectedVersion, transition.newStatus)
     const updated = await client.query(update.sql, update.values)
     await insertWorkflowEvents(client, req, {

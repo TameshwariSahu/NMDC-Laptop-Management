@@ -14,7 +14,7 @@ test('first Admin bootstrap creates a profile and BOOTSTRAP audit row atomically
     name: 'Synthetic Bootstrap Administrator',
     email: `bootstrap-${tag}@example.invalid`,
     designation: 'Synthetic Administrator',
-    employeeCategory: 'Executive',
+    employeeCategory: 'JO',
     department: 'Synthetic Test Department',
   }
 
@@ -44,7 +44,7 @@ test('first Admin bootstrap creates a profile and BOOTSTRAP audit row atomically
   assert.equal(audit.rows[0].actor_sap_id, 'BOOTSTRAP')
   assert.equal(audit.rows[0].action, 'first_admin_created')
   assert.equal(audit.rows[0].entity_type, 'user')
-  assert.deepEqual(audit.rows[0].details.changedFields, ['sapId', 'email', 'employeeProfile', 'role'])
+  assert.deepEqual(audit.rows[0].details.changedFields, ['sapId', 'email', 'employeeProfile'])
 
   const secondSapId = `SE${randomUUID().replaceAll('-', '').slice(0, 6).toUpperCase()}`
   await assert.rejects(bootstrapFirstAdmin({ ...input, sapId: secondSapId }, pool), /An active Admin already exists/)

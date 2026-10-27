@@ -58,6 +58,7 @@ const EXPORT_SQL = `SELECT e.sap_id AS "sapId", e.employee_name AS "employeeName
     e.designation, e.employee_category AS "category", e.department,
     r.serial_number AS "serialNumber", r.model_number AS "modelNumber", r.mac_address AS "macAddress",
     r.operating_system AS "operatingSystem", r.purchase_date AS "purchaseDate", r.status,
+    r.ms_office_account_email AS "msOfficeAccountEmail",
     latest.remarks AS "latestRemarks",
     (r.license_key_ciphertext IS NOT NULL) AS "legacyKeyPresent",
     (r.windows_license_key_ciphertext IS NOT NULL) AS "windowsKeyPresent",
@@ -115,7 +116,7 @@ export async function listReports(req, res, next) {
     const pageValues = [...values, limit, offset]
     const [items, count] = await Promise.all([
       pool.query(`SELECT r.request_id AS "requestId", r.serial_number AS "serialNumber", r.purchase_date AS "purchaseDate",
-        r.model_number AS "modelNumber", r.mac_address AS "macAddress", r.operating_system AS "operatingSystem", r.status,
+        r.model_number AS "modelNumber", r.mac_address AS "macAddress", r.operating_system AS "operatingSystem", r.ms_office_account_email AS "msOfficeAccountEmail", r.status,
         r.created_at AS "createdAt", e.employee_name AS "employeeName", e.sap_id AS "employeeSapId", e.department,
         (r.license_key_ciphertext IS NOT NULL) AS "legacyKeyPresent",
         (r.windows_license_key_ciphertext IS NOT NULL) AS "windowsKeyPresent",

@@ -16,6 +16,7 @@ export function AccountsPage() {
   const [profileForm, setProfileForm] = useState({ employeeName: '', designation: '', employeeCategory: 'Executive', department: '' })
   const [showForm, setShowForm] = useState(false)
   const [error, setError] = useState('')
+  const [fieldErrors, setFieldErrors] = useState({})
   const [notice, setNotice] = useState('')
   const [loading, setLoading] = useState(true)
   async function refresh(offset = 0, search = activeQuery) {
@@ -29,14 +30,17 @@ export function AccountsPage() {
   }
   useEffect(() => { refresh(0, '') }, [])
   async function create(event) {
-    event.preventDefault(); setError(''); setNotice('')
+    event.preventDefault(); setError(''); setNotice(''); setFieldErrors({})
     try {
       const account = await laptopApi.createAccount(form)
       setRows((current) => [account, ...current.filter((row) => row.userId !== account.userId)])
       setQuery(''); setActiveQuery('')
       setForm(initialAccount); setShowForm(false); setNotice('Account created and audited.')
       await refresh(0, '')
-    } catch (e) { setError(e.message) }
+    } catch (e) {
+      setFieldErrors(e.fieldErrors ?? {})
+      setError(Object.keys(e.fieldErrors ?? {}).length ? '' : e.message)
+    }
   }
   async function toggleActive(account) {
     setError(''); setNotice('')
@@ -57,8 +61,8 @@ export function AccountsPage() {
     <div className="page-heading"><div><span className="eyebrow">ADMINISTRATION</span><h1>Account directory</h1><p>Review and manage employee, engineer, and admin accounts.</p></div><button className="button button-primary" onClick={() => setShowForm((value) => !value)}>＋ {showForm ? 'Close' : 'Add account'}</button></div>
     {error && <div className="form-error" role="alert">{error}</div>}{notice && <div className="inline-success">{notice}</div>}
     {showForm && <section className="surface form-card"><h2>Create account</h2><form className="form-grid" autoComplete="off" onSubmit={create}>
-      <label>SAP ID<input autoComplete="off" required minLength="8" maxLength="8" value={form.sapId} onChange={(e) => setForm({ ...form, sapId: e.target.value.toUpperCase().slice(0, 8) })} /></label>
-      <label>Official email<input autoComplete="off" required type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></label>
+      <label>SAP ID<input autoComplete="off" required minLength="8" maxLength="8" value={form.sapId} onChange={(e) => { setForm({ ...form, sapId: e.target.value.toUpperCase().slice(0, 8) }); setFieldErrors((current) => ({ ...current, sapId: '' })) }} />{fieldErrors.sapId && <span className="field-error" role="alert">{fieldErrors.sapId}</span>}</label>
+      <label>Official email<input autoComplete="off" required type="email" value={form.email} onChange={(e) => { setForm({ ...form, email: e.target.value }); setFieldErrors((current) => ({ ...current, email: '' })) }} />{fieldErrors.email && <span className="field-error" role="alert">{fieldErrors.email}</span>}</label>
       <label>Role<select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}><option value="employee">Employee</option><option value="engineer">Engineer</option><option value="admin">Admin</option></select></label>
       <label>Name<input autoComplete="off" name="new-account-name" required value={form.employeeName} onChange={(e) => setForm({ ...form, employeeName: e.target.value })} /></label>
       <label>Designation<input autoComplete="off" name="new-account-designation" required value={form.designation} onChange={(e) => setForm({ ...form, designation: e.target.value })} /></label>

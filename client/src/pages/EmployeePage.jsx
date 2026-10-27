@@ -5,8 +5,10 @@ import StatusBadge from '../components/StatusBadge.jsx'
 import { laptopApi } from '../services/laptopApi.js'
 import { formatPurchaseDate } from '../utils/formatDate.js'
 import { normalizeMacAddress } from '../utils/macAddress.js'
+import { normalizeLicenseKey } from '../utils/licenseKey.js'
+import { normalizeEmail } from '../utils/email.js'
 
-const blankForm = { serialNumber: '', purchaseDate: '', modelNumber: '', macAddress: '', operatingSystem: 'Windows', windowsKey: '', officeKey: '', clearWindowsKey: false, clearOfficeKey: false, invoice: null }
+const blankForm = { serialNumber: '', purchaseDate: '', modelNumber: '', macAddress: '', operatingSystem: 'Windows', windowsKey: '', officeKey: '', msOfficeAccountEmail: '', clearWindowsKey: false, clearOfficeKey: false, invoice: null }
 const correctionStatuses = ['NEEDS_EMPLOYEE_CORRECTION', 'NEEDS_ENGINEER_CORRECTION']
 
 export default function EmployeePage() {
@@ -18,6 +20,9 @@ export default function EmployeePage() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [macError, setMacError] = useState('')
+  const [keyErrors, setKeyErrors] = useState({ windowsKey: '', officeKey: '' })
+  const [officeEmailError, setOfficeEmailError] = useState('')
+  const [fieldErrors, setFieldErrors] = useState({})
   const [loading, setLoading] = useState(true)
 
   async function refresh() {
@@ -27,21 +32,40 @@ export default function EmployeePage() {
   }
   useEffect(() => { refresh() }, [user.sapId])
 
-  function setField(name, value) { setForm((current) => ({ ...current, [name]: value })) }
+  function setField(name, value) {
+    setForm((current) => ({ ...current, [name]: value }))
+    setFieldErrors((current) => ({ ...current, [name]: '' }))
+  }
+  function setLicenseField(name, value) {
+    setField(name, value)
+    setKeyErrors((current) => ({ ...current, [name]: value && normalizeLicenseKey(value) === null ? `Invalid ${name === 'officeKey' ? 'MS Office' : 'Windows'} key.` : '' }))
+  }
   function startCorrection(request) {
     setEditingId(request.id)
     setEditingRequest(request)
-    setForm({ ...blankForm, serialNumber: request.serialNumber, purchaseDate: String(request.purchaseDate).slice(0, 10), modelNumber: request.modelNumber, macAddress: normalizeMacAddress(request.macAddress) ?? '', operatingSystem: request.operatingSystem })
+    setForm({ ...blankForm, serialNumber: request.serialNumber, purchaseDate: String(request.purchaseDate).slice(0, 10), modelNumber: request.modelNumber, macAddress: normalizeMacAddress(request.macAddress) ?? '', operatingSystem: request.operatingSystem, msOfficeAccountEmail: request.msOfficeAccountEmail ?? '' })
     setError(''); setNotice('')
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
   async function submit(event) {
-    event.preventDefault(); setError(''); setNotice('')
+    event.preventDefault(); setError(''); setNotice(''); setFieldErrors({})
     if (!normalizeMacAddress(form.macAddress)) {
       setMacError('Enter a valid MAC address.')
       return
     }
     setMacError('')
+    const nextKeyErrors = {
+      windowsKey: form.windowsKey && normalizeLicenseKey(form.windowsKey) === null ? 'Invalid Windows key.' : '',
+      officeKey: form.officeKey && normalizeLicenseKey(form.officeKey) === null ? 'Invalid MS Office key.' : '',
+    }
+    setKeyErrors(nextKeyErrors)
+    if (nextKeyErrors.windowsKey || nextKeyErrors.officeKey) return
+    const normalizedOfficeEmail = normalizeEmail(form.msOfficeAccountEmail)
+    if (normalizedOfficeEmail === false || (form.officeKey && !normalizedOfficeEmail)) {
+      setOfficeEmailError(normalizedOfficeEmail === false ? 'Enter a valid MS Office account email.' : 'MS Office account email is required when an MS Office key is entered.')
+      return
+    }
+    setOfficeEmailError('')
     if (editingId && editingRequest?.needsInvoiceReplacement && !form.invoice) {
       setError('Attach a replacement invoice before resubmitting this request.')
       return
@@ -50,7 +74,10 @@ export default function EmployeePage() {
       await laptopApi.saveRequest(user, form, editingId, editingRequest)
       setForm(blankForm); setEditingId(null); setEditingRequest(null); setNotice(editingId ? 'Your correction has been sent back to the Engineer queue.' : 'Laptop request submitted to the Engineer queue.')
       await refresh()
-    } catch (submitError) { setError(submitError.message) }
+    } catch (submitError) {
+      setFieldErrors(submitError.fieldErrors ?? {})
+      setError(Object.keys(submitError.fieldErrors ?? {}).length ? '' : submitError.message)
+    }
   }
 
   return (
@@ -69,14 +96,15 @@ export default function EmployeePage() {
           {error && <div className="form-error" role="alert">{error}</div>}
           {notice && <div className="inline-success" role="status">{notice}</div>}
           <form className="form-grid" autoComplete="off" onSubmit={submit}>
-            <label className="span-2">Serial number<input value={form.serialNumber} onChange={(event) => setField('serialNumber', event.target.value)} required placeholder="e.g. PF4X9L2" /></label>
+            <label className="span-2">Serial number<input value={form.serialNumber} onChange={(event) => setField('serialNumber', event.target.value)} required placeholder="e.g. PF4X9L2" />{fieldErrors.serialNumber && <span className="field-error" role="alert">{fieldErrors.serialNumber}</span>}</label>
             <label>Purchase date<input type="date" value={form.purchaseDate} onChange={(event) => setField('purchaseDate', event.target.value)} required /></label>
             <label>Model number<input value={form.modelNumber} onChange={(event) => setField('modelNumber', event.target.value)} required placeholder="e.g. ThinkPad T14" /></label>
-            <label className="span-2">MAC address<input type="text" autoComplete="new-password" autoCapitalize="characters" autoCorrect="off" spellCheck="false" name={`device-mac-${user.sapId}`} value={form.macAddress} onFocus={(event) => { if (!normalizeMacAddress(event.currentTarget.value) && !normalizeMacAddress(form.macAddress)) { event.currentTarget.value = ''; setField('macAddress', ''); setMacError('') } }} onChange={(event) => { setField('macAddress', event.target.value); setMacError(event.target.value && !normalizeMacAddress(event.target.value) ? 'Enter a valid MAC address.' : '') }} required /></label>
+            <label className="span-2">MAC address<input type="text" autoComplete="new-password" autoCapitalize="characters" autoCorrect="off" spellCheck="false" name={`device-mac-${user.sapId}`} value={form.macAddress} onFocus={(event) => { if (!normalizeMacAddress(event.currentTarget.value) && !normalizeMacAddress(form.macAddress)) { event.currentTarget.value = ''; setField('macAddress', ''); setMacError('') } }} onChange={(event) => { setField('macAddress', event.target.value); setMacError(event.target.value && !normalizeMacAddress(event.target.value) ? 'Enter a valid MAC address.' : '') }} required />{fieldErrors.macAddress && <span className="field-error" role="alert">{fieldErrors.macAddress}</span>}</label>
             {macError && <p className="field-error span-2" role="alert">{macError}</p>}
-            <label>Operating system<select value={form.operatingSystem} onChange={(event) => { setField('operatingSystem', event.target.value); if (event.target.value === 'macOS') setField('windowsKey', '') }}><option>Windows</option><option>macOS</option></select></label>
-            <label>Windows key <span className="optional-label">Optional</span><input type="password" autoComplete="off" disabled={form.operatingSystem === 'macOS'} value={form.windowsKey} onChange={(event) => setField('windowsKey', event.target.value)} placeholder={form.operatingSystem === 'macOS' ? 'Not used for macOS' : 'Enter only if assigned'} /></label>
-            <label>MS Office key <span className="optional-label">Optional</span><input type="password" autoComplete="off" value={form.officeKey} onChange={(event) => setField('officeKey', event.target.value)} placeholder="Enter only if assigned" /></label>
+            <label>Operating system<select value={form.operatingSystem} onChange={(event) => { setField('operatingSystem', event.target.value); if (event.target.value === 'macOS') { setField('windowsKey', ''); setKeyErrors((current) => ({ ...current, windowsKey: '' })) } }}><option>Windows</option><option>macOS</option></select></label>
+            <label>Windows key <span className="optional-label">Optional</span><input type="password" autoComplete="off" disabled={form.operatingSystem === 'macOS'} value={form.windowsKey} onChange={(event) => setLicenseField('windowsKey', event.target.value)} placeholder={form.operatingSystem === 'macOS' ? 'Not used for macOS' : 'Enter only if assigned'} />{keyErrors.windowsKey && <span className="field-error" role="alert">{keyErrors.windowsKey}</span>}</label>
+            <label>MS Office key <span className="optional-label">Optional</span><input type="password" autoComplete="off" value={form.officeKey} onChange={(event) => setLicenseField('officeKey', event.target.value)} placeholder="Enter only if assigned" />{keyErrors.officeKey && <span className="field-error" role="alert">{keyErrors.officeKey}</span>}</label>
+            <label className="span-2">MS Office account email <span className="optional-label">Required with MS Office key</span><input type="email" autoComplete="off" value={form.msOfficeAccountEmail} onChange={(event) => { const value = event.target.value; setField('msOfficeAccountEmail', value); const normalized = normalizeEmail(value); setOfficeEmailError(normalized === false ? 'Enter a valid MS Office account email.' : '') }} />{officeEmailError && <span className="field-error" role="alert">{officeEmailError}</span>}</label>
             {editingRequest?.windowsKeyPresent && <label className="span-2 key-clear-option"><input type="checkbox" checked={form.clearWindowsKey} onChange={(event) => setField('clearWindowsKey', event.target.checked)} /> Clear the saved Windows key before changing this device to macOS. Save the removal first.</label>}
             {editingRequest?.officeKeyPresent && <label className="span-2 key-clear-option"><input type="checkbox" checked={form.clearOfficeKey} onChange={(event) => setField('clearOfficeKey', event.target.checked)} /> Remove the saved MS Office key</label>}
             <label className="span-2">Purchase invoice <span className="optional-label">PDF or image</span><input className="file-input" type="file" accept=".pdf,image/*" required={Boolean(editingRequest?.needsInvoiceReplacement)} onChange={(event) => setField('invoice', event.target.files?.[0] || null)} /></label>

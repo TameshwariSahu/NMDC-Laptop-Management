@@ -32,7 +32,7 @@ Act as a senior full-stack developer and help me build a secure, maintainable La
 
 ## 3. Employee and laptop information
 
-Employee fields: SAP ID, name, official email, designation, category (Workman/Executive) and department.
+Employee fields: SAP ID, name, official email, designation, category (Workman, Executive or JO (Junior Officer)) and department.
 
 Laptop fields: serial number, purchase date, model number, MAC address, operating system (Windows/macOS), optional MS license key and invoice.
 

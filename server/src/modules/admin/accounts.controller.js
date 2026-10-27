@@ -7,10 +7,11 @@ async function audit(client, actor, action, id, details) {
   await client.query(`INSERT INTO audit_log (actor_user_id, actor_sap_id, action, entity_type, entity_id, details)
     VALUES ($1,$2,$3,'user',$4,$5::jsonb)`, [actor.userId, actor.sapId, action, id, JSON.stringify(details)])
 }
-function employeeFields(body) {
+function profileFields(body) {
   const f = ['employeeName', 'designation', 'employeeCategory', 'department']
-  if (f.some((key) => typeof body[key] !== 'string' || !body[key].trim())) throw err(400, 'Employee accounts require employeeName, designation, employeeCategory and department')
-  if (!['Workman', 'Executive'].includes(body.employeeCategory)) throw err(400, 'employeeCategory must be Workman or Executive')
+  if (f.some((key) => typeof body[key] !== 'string' || !body[key].trim())) throw err(400, 'All accounts require employeeName, designation, employeeCategory and department')
+  if (body.employeeName.trim().length > 160 || body.designation.trim().length > 120 || body.department.trim().length > 120) throw err(400, 'Name, designation or department is too long')
+  if (!['Workman', 'Executive', 'JO'].includes(body.employeeCategory)) throw err(400, 'employeeCategory must be Workman, Executive or JO')
   return [body.employeeName.trim(), body.designation.trim(), body.employeeCategory, body.department.trim()]
 }
 export async function listAccounts(req, res, next) {
@@ -35,17 +36,47 @@ export async function createAccount(req, res, next) {
     const { sapId, email, role } = req.body ?? {}
     const normalizedSapId = normalizeSapId(sapId)
     if (!isValidSapId(normalizedSapId) || typeof email !== 'string' || !/^\S+@\S+\.\S+$/.test(email) || !ROLES.includes(role)) throw err(400, 'Provide an 8-character SAP ID, valid email and role')
-    const profile = role === 'employee' ? employeeFields(req.body) : null
+    const profile = profileFields(req.body)
     await client.query('BEGIN')
     const result = await client.query('INSERT INTO users (sap_id,email,role) VALUES ($1,$2,$3) RETURNING user_id,sap_id,email,role,is_active', [normalizedSapId, email.trim(), role])
     const user = result.rows[0]
-    if (profile) await client.query(`INSERT INTO employees (user_id,sap_id,employee_name,email,designation,employee_category,department)
+    await client.query(`INSERT INTO employees (user_id,sap_id,employee_name,email,designation,employee_category,department)
       VALUES ($1,$2,$3,$4,$5,$6,$7)`, [user.user_id, user.sap_id, profile[0], user.email, profile[1], profile[2], profile[3]])
-    await audit(client, req.currentUser, 'account_created', user.user_id, { sapId: user.sap_id, role, changedFields: ['sapId','email','role', ...(profile ? ['employeeProfile'] : [])] })
+    await audit(client, req.currentUser, 'account_created', user.user_id, { sapId: user.sap_id, role, changedFields: ['sapId','email','role','employeeProfile'] })
     await client.query('COMMIT')
     return res.status(201).json({ account: {
       userId: user.user_id, sapId: user.sap_id, email: user.email, role, isActive: user.is_active,
-      ...(profile ? { employeeName: profile[0], designation: profile[1], employeeCategory: profile[2], department: profile[3] } : {}),
+      employeeName: profile[0], designation: profile[1], employeeCategory: profile[2], department: profile[3],
+    } })
+  } catch (error) { await client.query('ROLLBACK').catch(() => {}); return next(error) }
+  finally { client.release() }
+}
+
+export async function updateAccountProfile(req, res, next) {
+  const client = await pool.connect()
+  try {
+    const id = req.params.userId
+    if (!/^[0-9a-f-]{36}$/i.test(id)) throw err(400, 'Invalid account ID')
+    const profile = profileFields(req.body ?? {})
+    await client.query('BEGIN')
+    const user = await client.query('SELECT user_id,sap_id,email,role FROM users WHERE user_id=$1 FOR UPDATE', [id])
+    if (!user.rowCount) throw err(404, 'Account not found')
+    const current = await client.query('SELECT employee_id FROM employees WHERE user_id=$1', [id])
+    if (current.rowCount) {
+      await client.query(`UPDATE employees SET employee_name=$2,designation=$3,employee_category=$4,department=$5
+        WHERE user_id=$1`, [id, ...profile])
+    } else {
+      await client.query(`INSERT INTO employees (user_id,sap_id,employee_name,email,designation,employee_category,department)
+        VALUES ($1,$2,$3,$4,$5,$6,$7)`, [id, user.rows[0].sap_id, profile[0], user.rows[0].email, profile[1], profile[2], profile[3]])
+    }
+    await audit(client, req.currentUser, current.rowCount ? 'account_profile_updated' : 'account_profile_created', id, {
+      sapId: user.rows[0].sap_id, role: user.rows[0].role,
+      changedFields: ['employeeName','designation','employeeCategory','department'],
+    })
+    await client.query('COMMIT')
+    return res.json({ account: {
+      userId: id, sapId: user.rows[0].sap_id, role: user.rows[0].role,
+      employeeName: profile[0], designation: profile[1], employeeCategory: profile[2], department: profile[3],
     } })
   } catch (error) { await client.query('ROLLBACK').catch(() => {}); return next(error) }
   finally { client.release() }
@@ -75,14 +106,14 @@ export async function updateAccount(req, res, next) {
     if (newRole === 'employee') {
       const existing = await client.query('SELECT employee_id FROM employees WHERE user_id=$1', [id])
       if (!existing.rowCount) {
-        const profile = employeeFields(body)
+        const profile = profileFields(body)
         await client.query(`INSERT INTO employees (user_id,sap_id,employee_name,email,designation,employee_category,department)
           SELECT user_id,sap_id,$2,email,$3,$4,$5 FROM users WHERE user_id=$1`, [id,profile[0],profile[1],profile[2],profile[3]])
         changed.push('employeeProfile')
       } else {
         const fields = ['employeeName','designation','employeeCategory','department'].filter((k) => body[k] !== undefined)
         if (fields.length) {
-          const profile = employeeFields({
+          const profile = profileFields({
             employeeName: body.employeeName ?? (await client.query('SELECT employee_name FROM employees WHERE user_id=$1',[id])).rows[0].employee_name,
             designation: body.designation ?? (await client.query('SELECT designation FROM employees WHERE user_id=$1',[id])).rows[0].designation,
             employeeCategory: body.employeeCategory ?? (await client.query('SELECT employee_category FROM employees WHERE user_id=$1',[id])).rows[0].employee_category,

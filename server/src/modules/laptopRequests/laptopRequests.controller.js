@@ -6,20 +6,24 @@ import { pool } from '../../db/pool.js'
 import { env } from '../../config/env.js'
 import { detectInvoiceType, parseInvoiceMultipart } from './multipart.js'
 import { normalizeMacAddress } from '../../utils/macAddress.js'
+import { normalizeLicenseKey } from '../../utils/licenseKey.js'
+import { normalizeEmail } from '../../utils/email.js'
 
 export const invoiceStorageDirectory = env.invoiceStorageDir
   ? path.resolve(env.invoiceStorageDir)
   : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../private-invoices')
 function validateLaptopFields(fields) {
   const macAddress = normalizeMacAddress(fields.macAddress)
+  const msOfficeAccountEmail = normalizeEmail(fields.msOfficeAccountEmail)
   const values = {
     serialNumber: String(fields.serialNumber ?? '').trim(),
     purchaseDate: String(fields.purchaseDate ?? '').trim(),
     modelNumber: String(fields.modelNumber ?? '').trim(),
     macAddress,
     operatingSystem: String(fields.operatingSystem ?? '').trim(),
-    windowsKey: String(fields.windowsKey ?? '').trim(),
-    officeKey: String(fields.officeKey ?? '').trim(),
+    windowsKey: normalizeLicenseKey(fields.windowsKey),
+    officeKey: normalizeLicenseKey(fields.officeKey),
+    msOfficeAccountEmail,
   }
   if (!values.serialNumber || values.serialNumber.length > 255) throw httpError(400, 'Serial number is required and must be at most 255 characters')
   if (!/^\d{4}-\d{2}-\d{2}$/.test(values.purchaseDate) || Number.isNaN(Date.parse(`${values.purchaseDate}T00:00:00Z`))
@@ -29,7 +33,14 @@ function validateLaptopFields(fields) {
   if (!values.modelNumber || values.modelNumber.length > 255) throw httpError(400, 'Model number is required and must be at most 255 characters')
   if (!values.macAddress) throw httpError(400, 'Enter a valid MAC address.')
   if (!['Windows', 'macOS'].includes(values.operatingSystem)) throw httpError(400, 'Operating system must be Windows or macOS')
-  if (values.windowsKey.length > 512 || values.officeKey.length > 512) throw httpError(400, 'License keys must be at most 512 characters')
+  if (values.windowsKey === null) throw httpError(400, 'Invalid Windows key.')
+  if (values.officeKey === null) throw httpError(400, 'Invalid MS Office key.')
+  if (msOfficeAccountEmail === false) {
+    throw httpError(400, 'Enter a valid MS Office account email.')
+  }
+  if (values.officeKey && !values.msOfficeAccountEmail) {
+    throw httpError(400, 'MS Office account email is required when an MS Office key is entered.')
+  }
   if (values.operatingSystem === 'macOS' && values.windowsKey) throw httpError(400, 'A Windows key cannot be used with macOS')
   return values
 }
@@ -44,12 +55,14 @@ function decodeSecret(value, name) {
 export function encryptLicenseKey(licenseKey, keyType = 'legacy') {
   if (!licenseKey) return { ciphertext: null, nonce: null, authTag: null, fingerprint: null }
   if (!['windows', 'office', 'legacy'].includes(keyType)) throw httpError(400, 'Invalid license key type')
+  const normalizedKey = normalizeLicenseKey(licenseKey)
+  if (!normalizedKey) throw httpError(400, `Invalid ${keyType === 'office' ? 'MS Office' : 'Windows'} key.`)
   const encryptionKey = decodeSecret(env.licenseEncryptionKey, 'LICENSE_ENCRYPTION_KEY')
   const hmacKey = decodeSecret(env.licenseHmacKey, 'LICENSE_HMAC_KEY')
   const nonce = randomBytes(12)
   const cipher = createCipheriv('aes-256-gcm', encryptionKey, nonce)
-  const ciphertext = Buffer.concat([cipher.update(licenseKey, 'utf8'), cipher.final()])
-  const fingerprint = createHmac('sha256', hmacKey).update(keyType).update('\0').update(licenseKey).digest()
+  const ciphertext = Buffer.concat([cipher.update(normalizedKey, 'utf8'), cipher.final()])
+  const fingerprint = createHmac('sha256', hmacKey).update(keyType).update('\0').update(normalizedKey).digest()
   return { ciphertext, nonce, authTag: cipher.getAuthTag(), fingerprint }
 }
 
@@ -91,14 +104,28 @@ async function parseRequest(req) {
   const { fields, invoice } = parseInvoiceMultipart(req.body, req.get('content-type') ?? '')
   const laptop = validateLaptopFields(fields)
   const detected = detectInvoiceType(invoice)
-  return { laptop, invoice, detected }
+  return { laptop, invoice, detected, fields }
 }
 
-export async function createLaptopRequest(req, res, next) {
+async function createRequest(req, res, next, onBehalf = false) {
   let storedKey
   const client = await pool.connect()
   try {
-    const { laptop, invoice, detected } = await parseRequest(req)
+    const { laptop, invoice, detected, fields } = await parseRequest(req)
+    let ownerEmployeeId = req.currentUser.employeeId
+    if (onBehalf) {
+      const sapIdInput = String(fields.employeeSapId ?? '').trim()
+      if (!/^[A-Za-z0-9]{8}$/.test(sapIdInput)) throw httpError(400, 'Employee SAP ID must be exactly 8 characters')
+      const employee = await pool.query(
+        `SELECT e.employee_id
+         FROM employees e JOIN users u ON u.user_id = e.user_id
+         WHERE upper(e.sap_id) = upper($1) AND u.role = 'employee' AND u.is_active = TRUE`,
+        [sapIdInput],
+      )
+      if (!employee.rows[0]) throw httpError(404, 'Employee not found')
+      ownerEmployeeId = employee.rows[0].employee_id
+    }
+    if (!ownerEmployeeId) throw httpError(403, 'Employee profile is required')
     const windowsLicense = encryptLicenseKey(laptop.windowsKey, 'windows')
     const officeLicense = encryptLicenseKey(laptop.officeKey, 'office')
     const fileId = randomUUID()
@@ -112,15 +139,17 @@ export async function createLaptopRequest(req, res, next) {
           operating_system, windows_license_key_ciphertext, windows_license_key_nonce,
           windows_license_key_auth_tag, windows_license_key_hmac,
           office_license_key_ciphertext, office_license_key_nonce,
-          office_license_key_auth_tag, office_license_key_hmac)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+          office_license_key_auth_tag, office_license_key_hmac,
+          ms_office_account_email, registered_by_user_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        RETURNING request_id, serial_number, purchase_date, model_number, mac_address,
-         operating_system, status, version, created_at, updated_at,
+         operating_system, ms_office_account_email, status, version, created_at, updated_at,
          (license_key_ciphertext IS NOT NULL) AS legacy_key_present`,
-      [req.currentUser.employeeId, laptop.serialNumber, laptop.purchaseDate, laptop.modelNumber,
+      [ownerEmployeeId, laptop.serialNumber, laptop.purchaseDate, laptop.modelNumber,
         laptop.macAddress, laptop.operatingSystem,
         windowsLicense.ciphertext, windowsLicense.nonce, windowsLicense.authTag, windowsLicense.fingerprint,
-        officeLicense.ciphertext, officeLicense.nonce, officeLicense.authTag, officeLicense.fingerprint],
+        officeLicense.ciphertext, officeLicense.nonce, officeLicense.authTag, officeLicense.fingerprint,
+        laptop.msOfficeAccountEmail, onBehalf ? req.currentUser.userId : null],
     )
     const request = inserted.rows[0]
     await client.query(
@@ -131,8 +160,9 @@ export async function createLaptopRequest(req, res, next) {
     )
     await client.query(
       `INSERT INTO audit_log (actor_user_id, actor_sap_id, action, entity_type, entity_id, details)
-       VALUES ($1, $2, 'laptop_request_submitted', 'laptop_request', $3, $4::jsonb)`,
-      [req.currentUser.userId, req.currentUser.sapId, request.request_id, JSON.stringify({ status: request.status })],
+       VALUES ($1, $2, $3, 'laptop_request', $4, $5::jsonb)`,
+      [req.currentUser.userId, req.currentUser.sapId, onBehalf ? 'registered_on_behalf' : 'laptop_request_submitted',
+        request.request_id, JSON.stringify({ status: request.status })],
     )
     await storeInvoice(metadata, invoice.data)
     storedKey = storageKey
@@ -146,6 +176,30 @@ export async function createLaptopRequest(req, res, next) {
   } finally {
     client.release()
   }
+}
+
+export async function createLaptopRequest(req, res, next) {
+  return createRequest(req, res, next, false)
+}
+
+export async function registerLaptopOnBehalf(req, res, next) {
+  return createRequest(req, res, next, true)
+}
+
+export async function searchEmployeeForEngineer(req, res, next) {
+  try {
+    const sapId = String(req.query.sapId ?? '').trim()
+    if (!/^[A-Za-z0-9]{8}$/.test(sapId)) throw httpError(400, 'SAP ID must be exactly 8 characters')
+    const result = await pool.query(
+      `SELECT e.sap_id AS "sapId", e.employee_name AS "employeeName",
+              e.designation, e.employee_category AS category, e.department
+       FROM employees e JOIN users u ON u.user_id = e.user_id
+       WHERE upper(e.sap_id) = upper($1) AND u.role = 'employee' AND u.is_active = TRUE`,
+      [sapId],
+    )
+    if (!result.rows[0]) return res.status(404).json({ error: 'Employee not found' })
+    return res.json({ employee: result.rows[0] })
+  } catch (error) { return next(error) }
 }
 
 export async function uploadRequestInvoice(req, res, next) {
@@ -230,6 +284,7 @@ export async function listOwnLaptopRequests(req, res, next) {
       `SELECT r.request_id AS "requestId", r.serial_number AS "serialNumber",
               r.purchase_date AS "purchaseDate", r.model_number AS "modelNumber",
               r.mac_address AS "macAddress", r.operating_system AS "operatingSystem",
+              r.ms_office_account_email AS "msOfficeAccountEmail",
               r.status, r.version, r.created_at AS "createdAt", r.updated_at AS "updatedAt",
               (r.license_key_ciphertext IS NOT NULL) AS "legacyKeyPresent",
               (r.windows_license_key_ciphertext IS NOT NULL) AS "windowsKeyPresent",

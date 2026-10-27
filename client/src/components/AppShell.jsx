@@ -5,7 +5,7 @@ import nmdcLogo from '../assets/nmdclogo.png'
 
 const navByRole = {
   employee: [{ to: '/employee', label: 'My workspace', icon: '▦' }],
-  engineer: [{ to: '/engineer', label: 'Review queue', icon: '◉' }, { to: '/reports', label: 'Reports', icon: '▤' }],
+  engineer: [{ to: '/engineer', label: 'Review queue', icon: '◉' }, { to: '/engineer/register', label: 'Register for employee', icon: '＋' }, { to: '/reports', label: 'Reports', icon: '▤' }],
   admin: [{ to: '/admin', label: 'Final review', icon: '◉' }, { to: '/admin/accounts', label: 'Accounts', icon: '♙' }, { to: '/admin/clearance', label: 'No-dues clearance', icon: '✓' }, { to: '/reports', label: 'Reports', icon: '▤' }],
 }
 
