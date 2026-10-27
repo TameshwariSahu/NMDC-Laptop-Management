@@ -185,6 +185,10 @@ export const laptopApi = {
     return (await apiFetch(`/admin/accounts/${userId}`, { method: 'PATCH', body: patch })).account
   },
 
+  async updateAccountProfile(userId, profile) {
+    return (await apiFetch(`/admin/accounts/${userId}/profile`, { method: 'PATCH', body: profile })).account
+  },
+
   async searchClearance(sapId) {
     return (await apiFetch(`/admin/retirement-clearances?sapId=${encodeURIComponent(sapId)}`)).clearances
   },

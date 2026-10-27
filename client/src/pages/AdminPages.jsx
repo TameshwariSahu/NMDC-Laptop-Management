@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useAuth } from '../auth/AuthContext.jsx'
 import { laptopApi } from '../services/laptopApi.js'
+import { employeeCategoryLabel } from '../utils/employeeCategory.js'
 
 const initialAccount = { sapId: '', email: '', role: 'employee', employeeName: '', designation: '', employeeCategory: 'Executive', department: '' }
 
@@ -11,6 +12,8 @@ export function AccountsPage() {
   const [activeQuery, setActiveQuery] = useState('')
   const [pagination, setPagination] = useState({ limit: 25, offset: 0, total: 0 })
   const [form, setForm] = useState(initialAccount)
+  const [profileTarget, setProfileTarget] = useState(null)
+  const [profileForm, setProfileForm] = useState({ employeeName: '', designation: '', employeeCategory: 'Executive', department: '' })
   const [showForm, setShowForm] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -40,6 +43,16 @@ export function AccountsPage() {
     try { await laptopApi.updateAccount(account.userId, { isActive: !account.isActive }); setNotice('Account status updated and audited.'); await refresh(pagination.offset, activeQuery) }
     catch (e) { setError(e.message); await refresh(pagination.offset, activeQuery) }
   }
+  async function saveProfile(event) {
+    event.preventDefault(); setError(''); setNotice('')
+    try {
+      const account = await laptopApi.updateAccountProfile(profileTarget.userId, profileForm)
+      setNotice('Account profile saved and audited.')
+      setProfileTarget(null)
+      await refresh(pagination.offset, activeQuery)
+      setRows((current) => current.map((row) => row.userId === account.userId ? { ...row, ...account } : row))
+    } catch (e) { setError(e.message) }
+  }
   return <div className="page-stack">
     <div className="page-heading"><div><span className="eyebrow">ADMINISTRATION</span><h1>Account directory</h1><p>Review and manage employee, engineer, and admin accounts.</p></div><button className="button button-primary" onClick={() => setShowForm((value) => !value)}>＋ {showForm ? 'Close' : 'Add account'}</button></div>
     {error && <div className="form-error" role="alert">{error}</div>}{notice && <div className="inline-success">{notice}</div>}
@@ -47,17 +60,22 @@ export function AccountsPage() {
       <label>SAP ID<input autoComplete="off" required minLength="8" maxLength="8" value={form.sapId} onChange={(e) => setForm({ ...form, sapId: e.target.value.toUpperCase().slice(0, 8) })} /></label>
       <label>Official email<input autoComplete="off" required type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></label>
       <label>Role<select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}><option value="employee">Employee</option><option value="engineer">Engineer</option><option value="admin">Admin</option></select></label>
-      {form.role === 'employee' && <>
-        <label>Name<input autoComplete="off" name="new-account-name" required value={form.employeeName} onChange={(e) => setForm({ ...form, employeeName: e.target.value })} /></label>
-        <label>Designation<input autoComplete="off" name="new-account-designation" required value={form.designation} onChange={(e) => setForm({ ...form, designation: e.target.value })} /></label>
-        <label>Category<select value={form.employeeCategory} onChange={(e) => setForm({ ...form, employeeCategory: e.target.value })}><option>Workman</option><option>Executive</option><option>JO</option></select></label>
-        <label>Department<input autoComplete="off" name="new-account-department" required value={form.department} onChange={(e) => setForm({ ...form, department: e.target.value })} /></label>
-      </>}
+      <label>Name<input autoComplete="off" name="new-account-name" required value={form.employeeName} onChange={(e) => setForm({ ...form, employeeName: e.target.value })} /></label>
+      <label>Designation<input autoComplete="off" name="new-account-designation" required value={form.designation} onChange={(e) => setForm({ ...form, designation: e.target.value })} /></label>
+      <label>Category<select value={form.employeeCategory} onChange={(e) => setForm({ ...form, employeeCategory: e.target.value })}><option value="Workman">Workman</option><option value="Executive">Executive</option><option value="JO">JO (Junior Officer)</option></select></label>
+      <label>Department<input autoComplete="off" name="new-account-department" required value={form.department} onChange={(e) => setForm({ ...form, department: e.target.value })} /></label>
       <div className="form-actions span-2"><button className="button button-primary">Create account</button></div>
+    </form></section>}
+    {profileTarget && <section className="surface form-card"><div className="section-heading"><h2>Edit profile · {profileTarget.sapId}</h2><button type="button" className="button button-quiet" onClick={() => setProfileTarget(null)}>Close</button></div><form className="form-grid" autoComplete="off" onSubmit={saveProfile}>
+      <label>Name<input autoComplete="off" required value={profileForm.employeeName} onChange={(e) => setProfileForm({ ...profileForm, employeeName: e.target.value })} /></label>
+      <label>Designation<input autoComplete="off" required value={profileForm.designation} onChange={(e) => setProfileForm({ ...profileForm, designation: e.target.value })} /></label>
+      <label>Category<select value={profileForm.employeeCategory} onChange={(e) => setProfileForm({ ...profileForm, employeeCategory: e.target.value })}><option value="Workman">Workman</option><option value="Executive">Executive</option><option value="JO">JO (Junior Officer)</option></select></label>
+      <label>Department<input autoComplete="off" required value={profileForm.department} onChange={(e) => setProfileForm({ ...profileForm, department: e.target.value })} /></label>
+      <div className="form-actions span-2"><button className="button button-primary">Save profile</button></div>
     </form></section>}
     <div className="surface table-surface"><div className="table-toolbar"><div><strong>Organization accounts</strong><span>Roles are set when an account is created. Activation changes are recorded in the audit log.</span></div><span className="count-pill">{pagination.total} accounts</span></div>
       <form className="account-search" onSubmit={(e) => { e.preventDefault(); const search = query.trim(); setActiveQuery(search); refresh(0, search) }}><input aria-label="Search accounts" placeholder="Search SAP ID, email, or employee name" value={query} onChange={(e) => setQuery(e.target.value)} /><button className="button button-quiet">Search</button></form>
-      <div className="table-scroll"><table><thead><tr><th>PERSON</th><th>SAP ID</th><th>ROLE</th><th>DEPARTMENT</th><th>STATUS</th><th>ACTIONS</th></tr></thead><tbody>{rows.map((account) => <tr key={account.userId}><td><div className="table-person"><div className="avatar small-avatar">{(account.employeeName || account.sapId).split(' ').map((word) => word[0]).join('').slice(0, 2)}</div><strong>{account.employeeName || account.sapId}</strong></div></td><td className="mono-cell">{account.sapId}</td><td><span className={`role-pill role-${account.role}`}>{account.role}</span></td><td>{account.department || '—'}</td><td><span className={account.isActive ? 'active-status' : 'inactive-status'}><i />{account.isActive ? 'Active' : 'Deactivated'}</span></td><td><button className="button button-quiet button-small" disabled={account.userId === user.userId} onClick={() => toggleActive(account)}>{account.isActive ? 'Deactivate' : 'Activate'}</button></td></tr>)}</tbody></table></div>
+      <div className="table-scroll"><table><thead><tr><th>PERSON</th><th>SAP ID</th><th>ROLE</th><th>DEPARTMENT</th><th>STATUS</th><th>ACTIONS</th></tr></thead><tbody>{rows.map((account) => <tr key={account.userId}><td><div className="table-person"><div className="avatar small-avatar">{(account.employeeName || account.sapId).split(' ').map((word) => word[0]).join('').slice(0, 2)}</div><div><strong>{account.employeeName || account.sapId}</strong>{account.employeeCategory && <small className="table-subline">{employeeCategoryLabel(account.employeeCategory)}</small>}</div></div></td><td className="mono-cell">{account.sapId}</td><td><span className={`role-pill role-${account.role}`}>{account.role}</span></td><td>{account.department || '—'}</td><td><span className={account.isActive ? 'active-status' : 'inactive-status'}><i />{account.isActive ? 'Active' : 'Deactivated'}</span></td><td><button className="button button-quiet button-small" onClick={() => { setProfileTarget(account); setProfileForm({ employeeName: account.employeeName ?? '', designation: account.designation ?? '', employeeCategory: account.employeeCategory ?? 'Executive', department: account.department ?? '' }) }}>Edit profile</button> <button className="button button-quiet button-small" disabled={account.userId === user.userId} onClick={() => toggleActive(account)}>{account.isActive ? 'Deactivate' : 'Activate'}</button></td></tr>)}</tbody></table></div>
       {loading && <p className="table-message">Loading accounts…</p>}{!loading && !rows.length && <p className="table-message">No accounts found.</p>}
       <div className="pagination-row"><span>{pagination.total ? `${pagination.offset + 1}–${Math.min(pagination.offset + pagination.limit, pagination.total)} of ${pagination.total}` : '0 accounts'}</span><div><button className="button button-quiet button-small" disabled={!pagination.offset || loading} onClick={() => refresh(Math.max(0, pagination.offset - pagination.limit), activeQuery)}>Previous</button><button className="button button-quiet button-small" disabled={pagination.offset + pagination.limit >= pagination.total || loading} onClick={() => refresh(pagination.offset + pagination.limit, activeQuery)}>Next</button></div></div>
     </div>
