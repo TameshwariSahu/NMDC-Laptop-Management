@@ -51,10 +51,10 @@ Implement endpoints for:
 - Listing requests awaiting Engineer review.
 - Viewing registration details and authorized invoice downloads.
 - Editing permitted fields.
-- Approving or rejecting a request with mandatory remarks.
+- Approving with optional remarks or rejecting with mandatory remarks.
 - Viewing transaction reports and duplicate Microsoft license warnings.
 
-Engineer approval moves the request to `PENDING_ADMIN`. Engineer rejection moves it to `NEEDS_EMPLOYEE_CORRECTION`.
+Engineer approval moves the request to `PENDING_ADMIN` and may include remarks. Engineer rejection moves it to `NEEDS_EMPLOYEE_CORRECTION` and requires remarks.
 
 ## 6. Admin APIs
 Implement endpoints for:
@@ -64,7 +64,7 @@ Implement endpoints for:
 - Viewing transaction reports and duplicate Microsoft license warnings.
 - Searching employees by SAP ID for retirement/no-dues clearance.
 
-Admin approval changes the request to `APPROVED` and locks ordinary edits. Admin rejection moves it to `NEEDS_ENGINEER_CORRECTION`.
+Admin approval changes the request to `APPROVED` and locks ordinary edits; approval remarks are optional. Admin rejection moves it to `NEEDS_ENGINEER_CORRECTION` and requires remarks.
 
 After Admin rejection, both the Employee and Engineer may make permitted corrections. Once corrections are submitted, the request must return to Engineer verification (`PENDING_ENGINEER`). Only Engineer approval can return it to Admin review.
 
@@ -86,7 +86,7 @@ After Admin rejection, both the Employee and Engineer may make permitted correct
 
 ## 9. Retirement clearance
 - Search for an employee by SAP ID.
-- Track asset return, license checks and the required additional checks.
+- Track removal of company-installed software and removal of antivirus as the two mandatory checks.
 - Prevent final clearance until all mandatory checks are complete and an authorized officer records clearance.
 - Record remarks, officer identity and timestamps.
 - Do not assume licenses must be deleted; follow the organization's approved deactivation or reassignment policy.

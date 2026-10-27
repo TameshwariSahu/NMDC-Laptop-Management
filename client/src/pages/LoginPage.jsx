@@ -52,7 +52,7 @@ export default function LoginPage() {
           <p>Register devices, follow reviews, and keep your organization’s laptop records in order.</p>
           <div className="story-stats"><div><strong>01</strong><span>Submit once</span></div><i /><div><strong>02</strong><span>Track clearly</span></div><i /><div><strong>03</strong><span>Close confidently</span></div></div>
         </div>
-        <div className="story-footer"><span>SECURE ORGANIZATION ACCESS</span><span>NMDC · IT SERVICES</span></div>
+        <div className="story-footer"><span></span><span>NMDC · IT SERVICES</span></div>
       </section>
       <section className="login-panel">
         <div className="login-card">

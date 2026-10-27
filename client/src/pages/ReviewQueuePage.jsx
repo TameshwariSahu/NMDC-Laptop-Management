@@ -4,6 +4,7 @@ import EmptyState from '../components/EmptyState.jsx'
 import StatusBadge from '../components/StatusBadge.jsx'
 import { laptopApi } from '../services/laptopApi.js'
 import { formatPurchaseDate } from '../utils/formatDate.js'
+import { normalizeMacAddress } from '../utils/macAddress.js'
 
 export default function ReviewQueuePage({ mode }) {
   const { user } = useAuth()
@@ -32,12 +33,12 @@ export default function ReviewQueuePage({ mode }) {
   const selected = queue.find((item) => item.id === selectedId) || queue[0]
   const latestRemark = selected?.remarks.at(-1)
   useEffect(() => {
-    if (selected) setEditForm({ serialNumber: selected.serialNumber, purchaseDate: String(selected.purchaseDate).slice(0, 10), modelNumber: selected.modelNumber, macAddress: selected.macAddress, operatingSystem: selected.operatingSystem, msLicenseKey: '', invoice: null })
+    if (selected) setEditForm({ serialNumber: selected.serialNumber, purchaseDate: String(selected.purchaseDate).slice(0, 10), modelNumber: selected.modelNumber, macAddress: selected.macAddress, operatingSystem: selected.operatingSystem, windowsKey: '', officeKey: '', clearWindowsKey: false, clearOfficeKey: false, invoice: null })
   }, [selected?.id, selected?.version])
 
   async function decide(decision) {
     setError(''); setNotice('')
-    if (!remark.trim()) { setError('A reviewer remark is required before you can decide.'); return }
+    if (decision === 'reject' && !remark.trim()) { setError('A remark is required to reject this request.'); return }
     setBusy(true)
     try {
       await laptopApi.decideRequest(user, selected, decision, remark)
@@ -49,6 +50,7 @@ export default function ReviewQueuePage({ mode }) {
   }
 
   async function saveEdit() {
+    if (!normalizeMacAddress(editForm?.macAddress)) { setError('Enter a valid MAC address.'); return }
     if (selected.status === 'PENDING_ENGINEER' && !remark.trim()) { setError('Remarks are required when editing a request.'); return }
     setBusy(true); setError(''); setNotice('')
     try {
@@ -71,11 +73,12 @@ export default function ReviewQueuePage({ mode }) {
       {error && <div className="form-error" role="alert">{error}</div>}{notice && <div className="inline-success">{notice}</div>}
       <div className="review-layout">
         <section className="surface queue-panel"><div className="section-heading"><div><span className="eyebrow">INCOMING</span><h2>Requests <span className="count-pill">{queue.length}</span></h2></div></div>
-          <div className="queue-list">{queue.length ? queue.map((item) => <button key={item.id} className={`queue-item${selected?.id === item.id ? ' selected' : ''}`} onClick={() => { setSelectedId(item.id); setRemark('') }}><div className="queue-item-top"><span className="request-id">{item.id}</span>{item.duplicateKeyWarning && <span className="warning-dot" title="Duplicate MS key warning">!</span>}</div><strong>{item.modelNumber}</strong><span>{item.employeeName} · {item.department}</span><small>{item.serialNumber}</small></button>) : <EmptyState title="Queue is clear" detail="New requests will appear here when they are submitted." />}</div>
+          <div className="queue-list">{queue.length ? queue.map((item) => <button key={item.id} className={`queue-item${selected?.id === item.id ? ' selected' : ''}`} onClick={() => { setSelectedId(item.id); setRemark('') }}><div className="queue-item-top"><StatusBadge status={item.status} />{item.duplicateKeyWarning && <span className="warning-dot" title="Duplicate MS key warning">!</span>}</div><strong>{item.modelNumber}</strong><span>{item.employeeName} · {item.employeeSapId} · {item.department}</span><small>{item.serialNumber}</small></button>) : <EmptyState title="Queue is clear" detail="New requests will appear here when they are submitted." />}</div>
         </section>
         {selected ? <section className="surface review-detail">
-          <div className="detail-heading"><div><span className="eyebrow">REQUEST DETAILS</span><h2>{selected.modelNumber}</h2><span className="request-id">{selected.id} · Submitted by {selected.employeeName}</span></div><StatusBadge status={selected.status} /></div>
-          {selected.duplicateKeyWarning && <div className="duplicate-warning"><div className="warning-symbol">!</div><div><strong>Duplicate MS-key match</strong><p>A match exists in another laptop record. Review this warning during approval.</p></div><span>CHECK REQUIRED</span></div>}
+          <div className="detail-heading"><div><span className="eyebrow">REQUEST DETAILS</span><h2>{selected.modelNumber}</h2><span>{selected.serialNumber} · {selected.employeeName} · {selected.employeeSapId}</span></div><StatusBadge status={selected.status} /></div>
+          {(selected.windowsKeyDuplicateWarning || selected.officeKeyDuplicateWarning || selected.duplicateKeyWarning) && <div className="duplicate-warning"><div className="warning-symbol">!</div><div><strong>Duplicate key match</strong><p>{selected.windowsKeyDuplicateWarning && 'Windows key matches another Windows key. '}{selected.officeKeyDuplicateWarning && 'MS Office key matches another MS Office key. '}Review the warning during approval.</p></div><span>CHECK REQUIRED</span></div>}
+          {selected.legacyKeyPresent && <div className="legacy-key-label">Legacy key</div>}
           <div className="detail-grid"><Detail label="Serial number" value={selected.serialNumber} /><Detail label="Purchase date" value={formatPurchaseDate(selected.purchaseDate)} /><Detail label="Model number" value={selected.modelNumber} /><Detail label="MAC address" value={selected.macAddress} /><Detail label="Operating system" value={selected.operatingSystem} /><Detail label="Employee department" value={selected.department} /></div>
           <div className="invoice-row"><div className="invoice-icon">{invoiceTypeLabel(selected.invoices?.at(-1)?.mimeType)}</div><div><strong>{selected.invoiceName || 'Invoice pending'}</strong><span>{selected.needsInvoiceReplacement ? 'Needs replacement' : 'Current private invoice'}</span></div>{selected.invoices?.at(-1) && <button className="button button-quiet button-small" onClick={() => laptopApi.downloadInvoice(selected.invoices.at(-1).fileId, selected.invoices.at(-1).originalName)}>Download ↗</button>}</div>
           {selected.needsInvoiceReplacement && <div className="invoice-replacement-notice">This invoice remains available for review, but the Employee must upload a replacement before resubmission.</div>}
@@ -84,13 +87,16 @@ export default function ReviewQueuePage({ mode }) {
             <label className="detail-cell"><span>Purchase date</span><input type="date" value={editForm?.purchaseDate ?? ''} onChange={(e) => setEditForm((f) => ({ ...f, purchaseDate: e.target.value }))} /></label>
             <label className="detail-cell"><span>Model number</span><input value={editForm?.modelNumber ?? ''} onChange={(e) => setEditForm((f) => ({ ...f, modelNumber: e.target.value }))} /></label>
             <label className="detail-cell"><span>MAC address</span><input value={editForm?.macAddress ?? ''} onChange={(e) => setEditForm((f) => ({ ...f, macAddress: e.target.value }))} /></label>
-            <label className="detail-cell"><span>Operating system</span><select value={editForm?.operatingSystem ?? 'Windows'} onChange={(e) => setEditForm((f) => ({ ...f, operatingSystem: e.target.value }))}><option>Windows</option><option>macOS</option></select></label>
+            <label className="detail-cell"><span>Operating system</span><select value={editForm?.operatingSystem ?? 'Windows'} onChange={(e) => setEditForm((f) => ({ ...f, operatingSystem: e.target.value, ...(e.target.value === 'macOS' ? { windowsKey: '' } : {}) }))}><option>Windows</option><option>macOS</option></select></label>
             <label className="detail-cell"><span>Replace invoice</span><input type="file" accept=".pdf,image/*" onChange={(e) => setEditForm((f) => ({ ...f, invoice: e.target.files?.[0] ?? null }))} /></label>
-            <label className="detail-cell"><span>Replace MS key (optional)</span><input type="password" autoComplete="off" value={editForm?.msLicenseKey ?? ''} onChange={(e) => setEditForm((f) => ({ ...f, msLicenseKey: e.target.value }))} /></label>
+            <label className="detail-cell"><span>Windows key (optional)</span><input type="password" autoComplete="off" disabled={editForm?.operatingSystem === 'macOS'} value={editForm?.windowsKey ?? ''} onChange={(e) => setEditForm((f) => ({ ...f, windowsKey: e.target.value }))} placeholder={editForm?.operatingSystem === 'macOS' ? 'Not used for macOS' : 'Enter only if assigned'} /></label>
+            <label className="detail-cell"><span>MS Office key (optional)</span><input type="password" autoComplete="off" value={editForm?.officeKey ?? ''} onChange={(e) => setEditForm((f) => ({ ...f, officeKey: e.target.value }))} /></label>
+            {selected.windowsKeyPresent && <label className="detail-cell key-clear-option"><input type="checkbox" checked={editForm?.clearWindowsKey ?? false} onChange={(e) => setEditForm((f) => ({ ...f, clearWindowsKey: e.target.checked }))} /><span>Clear saved Windows key. Save the removal before changing this device to macOS.</span></label>}
+            {selected.officeKeyPresent && <label className="detail-cell key-clear-option"><input type="checkbox" checked={editForm?.clearOfficeKey ?? false} onChange={(e) => setEditForm((f) => ({ ...f, clearOfficeKey: e.target.checked }))} /><span>Remove saved MS Office key</span></label>}
           </div>}
           {latestRemark && <div className="previous-remark"><span>PREVIOUS REMARK</span><p>{latestRemark.text}</p><small>{latestRemark.actor} · {latestRemark.date}</small></div>}
-          <label className="review-remark">{selected.status === 'NEEDS_ENGINEER_CORRECTION' ? 'Correction remarks' : 'Your decision remark'} {selected.status !== 'NEEDS_ENGINEER_CORRECTION' && <span className="required-label">Required</span>}<textarea rows="3" value={remark} onChange={(event) => setRemark(event.target.value)} placeholder={engineerMode ? 'Add your review notes…' : 'Add your final review notes…'} /></label>
-          <div className="decision-actions">{engineerMode && <button className="button button-quiet" disabled={busy} onClick={saveEdit}>{selected.status === 'NEEDS_ENGINEER_CORRECTION' ? 'Submit correction' : 'Save edits'}</button>}{selected.status !== 'NEEDS_ENGINEER_CORRECTION' && <><button className="button button-danger" disabled={busy} onClick={() => decide('reject')}>Return for correction</button><button className="button button-primary" disabled={busy} onClick={() => decide('approve')}>{engineerMode ? 'Approve for Admin' : 'Give final approval'}<span>→</span></button></>}</div>
+          <label className="review-remark">{selected.status === 'NEEDS_ENGINEER_CORRECTION' ? 'Correction remarks' : 'Decision remarks'} {selected.status !== 'NEEDS_ENGINEER_CORRECTION' && <span className="optional-label">Required for rejection</span>}<textarea rows="3" value={remark} onChange={(event) => setRemark(event.target.value)} placeholder={engineerMode ? 'Add your review notes…' : 'Add your final review notes…'} /></label>
+          <div className="decision-actions">{engineerMode && <button className="button button-quiet" disabled={busy} onClick={saveEdit}>{selected.status === 'NEEDS_ENGINEER_CORRECTION' ? 'Submit correction' : 'Save edits'}</button>}{selected.status !== 'NEEDS_ENGINEER_CORRECTION' && <><button className="button button-danger" disabled={busy} onClick={() => decide('reject')}>Return for correction</button><button className="button button-primary" disabled={busy} onClick={() => decide('approve')}>{engineerMode ? 'Approve for Admin' : 'final approval'}<span>→</span></button></>}</div>
         </section> : <section className="surface review-empty"><EmptyState title="Select a request" detail="Choose a request from the queue to review its details." /></section>}
       </div>
     </div>

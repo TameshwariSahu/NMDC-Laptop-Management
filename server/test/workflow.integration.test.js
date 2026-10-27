@@ -35,7 +35,7 @@ async function createActor(role) {
     'INSERT INTO users (sap_id, email, role) VALUES ($1, $2, $3) RETURNING user_id',
     [sapId, `${role}-${tag}@example.invalid`, role],
   )
-  const result = { userId: user.rows[0].user_id, role }
+  const result = { userId: user.rows[0].user_id, role, sapId }
   if (role === 'employee') {
     const employee = await pool.query(
       `INSERT INTO employees
@@ -50,16 +50,21 @@ async function createActor(role) {
   return result
 }
 
-async function createRequest(owner, { status = 'PENDING_ENGINEER', version = 1, hmac = null } = {}) {
+async function createRequest(owner, { status = 'PENDING_ENGINEER', version = 1, hmac = null, windowsKey = null, operatingSystem = 'Windows' } = {}) {
   const tag = randomUUID()
-  const mac = tag.replaceAll('-', '').slice(0, 10).match(/.{2}/g).join(':')
+  const mac = tag.replaceAll('-', '').slice(0, 12).toUpperCase()
   const result = await pool.query(
     `INSERT INTO laptop_requests
        (owner_employee_id, serial_number, purchase_date, model_number, mac_address,
-        operating_system, status, version, license_key_hmac)
-     VALUES ($1, $2, DATE '2025-01-10', 'Workflow Synthetic', $3, 'Windows', $4, $5, $6)
+        operating_system, status, version, license_key_hmac, windows_license_key_ciphertext,
+        windows_license_key_nonce, windows_license_key_auth_tag, windows_license_key_hmac)
+     VALUES ($1, $2, DATE '2025-01-10', 'Workflow Synthetic', $3, $4, $5, $6, $7,
+       CASE WHEN $8::boolean THEN decode('01','hex') END,
+       CASE WHEN $8::boolean THEN decode(repeat('01',12),'hex') END,
+       CASE WHEN $8::boolean THEN decode(repeat('02',16),'hex') END,
+       CASE WHEN $8::boolean THEN decode(repeat('ab',32),'hex') END)
      RETURNING request_id, version`,
-    [owner.employeeId, `WF-SERIAL-${tag}`, `02:${mac}`, status, version, hmac],
+    [owner.employeeId, `WF-SERIAL-${tag}`, mac, operatingSystem, status, version, hmac, Boolean(windowsKey)],
   )
   return result.rows[0]
 }
@@ -108,17 +113,13 @@ test('engineer and admin queues are status-filtered, paginated, and details hide
   assert.equal(adminPage.pagination.total, 1)
 })
 
-test('engineer decisions require remarks, enforce workflow transitions, and commit history/audit/version together', { skip: !integrationReady }, async () => {
+test('approval may omit remarks; rejection still requires them and workflow events remain atomic', { skip: !integrationReady }, async () => {
   const employee = await createActor('employee')
   const engineer = await createActor('engineer')
   const approved = await createRequest(employee)
 
-  const missingRemarks = await api(`/engineer/requests/${approved.request_id}/decision`, engineer.token, {
-    method: 'POST', body: { action: 'approve', expectedVersion: 1 },
-  })
-  assert.equal(missingRemarks.status, 400)
   const approval = await api(`/engineer/requests/${approved.request_id}/decision`, engineer.token, {
-    method: 'POST', body: { action: 'approve', expectedVersion: 1, remarks: 'Synthetic engineer approval' },
+    method: 'POST', body: { action: 'approve', expectedVersion: 1 },
   })
   assert.equal(approval.status, 200)
   assert.equal((await json(approval)).request.status, 'PENDING_ADMIN')
@@ -133,7 +134,7 @@ test('engineer decisions require remarks, enforce workflow transitions, and comm
   assert.equal(stored.rows[0].status, 'PENDING_ADMIN')
   assert.equal(stored.rows[0].version, 2)
   assert.equal(stored.rows[0].action, 'ENGINEER_APPROVED')
-  assert.equal(stored.rows[0].remarks, 'Synthetic engineer approval')
+  assert.equal(stored.rows[0].remarks, null)
   assert.equal(stored.rows[0].old_status, 'PENDING_ENGINEER')
   assert.equal(stored.rows[0].new_status, 'PENDING_ADMIN')
   assert.equal(stored.rows[0].audit_count, 1)
@@ -144,6 +145,10 @@ test('engineer decisions require remarks, enforce workflow transitions, and comm
   assert.equal(stale.status, 409)
 
   const rejected = await createRequest(employee)
+  const rejectionWithoutRemarks = await api(`/engineer/requests/${rejected.request_id}/decision`, engineer.token, {
+    method: 'POST', body: { action: 'reject', expectedVersion: 1 },
+  })
+  assert.equal(rejectionWithoutRemarks.status, 400)
   const rejection = await api(`/engineer/requests/${rejected.request_id}/decision`, engineer.token, {
     method: 'POST', body: { action: 'reject', expectedVersion: 1, remarks: 'Synthetic correction needed' },
   })
@@ -190,12 +195,51 @@ test('admin rejection returns to engineer correction; only engineer approval can
   })
   assert.equal((await json(engineerApproval)).request.status, 'PENDING_ADMIN')
   const adminApproval = await api(`/admin/requests/${request.request_id}/decision`, admin.token, {
-    method: 'POST', body: { action: 'approve', expectedVersion: 4, remarks: 'Final synthetic approval' },
+    method: 'POST', body: { action: 'approve', expectedVersion: 4 },
   })
   assert.equal((await json(adminApproval)).request.status, 'APPROVED')
   assert.equal((await json(await api(`/admin/requests/${request.request_id}/decision`, admin.token, {
     method: 'POST', body: { action: 'reject', expectedVersion: 5, remarks: 'Locked after approval' },
   }))).error, 'This decision is not allowed for the current request status')
+})
+
+test('Engineer MAC edits reject invalid separators and normalize valid forms; edit remarks remain mandatory', { skip: !integrationReady }, async () => {
+  const employee = await createActor('employee'), engineer = await createActor('engineer')
+  const request = await createRequest(employee)
+  const targetMac = randomUUID().replaceAll('-', '').slice(0, 12).toUpperCase()
+  const colonTargetMac = targetMac.match(/.{2}/g).join(':').toLowerCase()
+  const noRemarks = await api(`/engineer/requests/${request.request_id}`, engineer.token, {
+    method: 'PATCH', body: { expectedVersion: 1, macAddress: targetMac },
+  })
+  assert.equal(noRemarks.status, 400)
+
+  const invalid = await api(`/engineer/requests/${request.request_id}`, engineer.token, {
+    method: 'PATCH', body: { expectedVersion: 1, macAddress: 'AA-BB-CC-DD-EE-FF', remarks: 'Synthetic edit' },
+  })
+  assert.equal(invalid.status, 400)
+
+  const edited = await api(`/engineer/requests/${request.request_id}`, engineer.token, {
+    method: 'PATCH', body: { expectedVersion: 1, macAddress: colonTargetMac, remarks: 'Synthetic edit' },
+  })
+  assert.equal(edited.status, 200)
+  const stored = await pool.query('SELECT mac_address FROM laptop_requests WHERE request_id=$1', [request.request_id])
+  assert.equal(stored.rows[0].mac_address, targetMac)
+})
+
+test('MAC uniqueness treats colon and colonless input as the same value', { skip: !integrationReady }, async () => {
+  const employee = await createActor('employee'), engineer = await createActor('engineer')
+  const first = await createRequest(employee)
+  const second = await createRequest(employee)
+  const mac = randomUUID().replaceAll('-', '').slice(0, 12).toUpperCase()
+  const colonMac = mac.match(/.{2}/g).join(':')
+  const saved = await api(`/engineer/requests/${first.request_id}`, engineer.token, {
+    method: 'PATCH', body: { expectedVersion: 1, macAddress: mac.toLowerCase(), remarks: 'Set synthetic address' },
+  })
+  assert.equal(saved.status, 200)
+  const duplicate = await api(`/engineer/requests/${second.request_id}`, engineer.token, {
+    method: 'PATCH', body: { expectedVersion: 1, macAddress: colonMac, remarks: 'Duplicate synthetic address' },
+  })
+  assert.equal(duplicate.status, 409)
 })
 
 test('employee correction checks ownership and version, re-encrypts changed keys, and records the transition atomically', { skip: !integrationReady }, async () => {
@@ -226,14 +270,15 @@ test('employee correction checks ownership and version, re-encrypts changed keys
   const corrected = await api(`/employee/requests/${employee.request_id}/corrections`, owner.token, {
     method: 'POST', body: {
       expectedVersion: 1, serialNumber: 'CORRECTED-SERIAL', modelNumber: 'Corrected synthetic model',
-      licenseKey: 'SYNTHETIC-KEY-DO-NOT-LOG', remarks: 'Updated requested details',
+      windowsKey: 'SYNTHETIC-KEY-DO-NOT-LOG', remarks: 'Updated requested details',
     },
   })
   assert.equal(corrected.status, 200)
   assert.equal((await json(corrected)).request.status, 'PENDING_ENGINEER')
   const stored = await pool.query(
     `SELECT r.status, r.version, r.model_number, r.license_key_ciphertext,
-            r.license_key_hmac, h.action, h.remarks,
+            r.license_key_hmac, r.windows_license_key_ciphertext,
+            r.windows_license_key_hmac, h.action, h.remarks,
             (SELECT COUNT(*)::INTEGER FROM audit_log a WHERE a.entity_id = r.request_id::text
              AND a.action = 'employee_resubmitted') AS audit_count
      FROM laptop_requests r JOIN approval_history h USING (request_id)
@@ -243,8 +288,10 @@ test('employee correction checks ownership and version, re-encrypts changed keys
   assert.equal(stored.rows[0].status, 'PENDING_ENGINEER')
   assert.equal(stored.rows[0].version, 2)
   assert.equal(stored.rows[0].model_number, 'Corrected synthetic model')
-  assert.ok(stored.rows[0].license_key_ciphertext)
-  assert.equal(stored.rows[0].license_key_hmac.length, 32)
+  assert.equal(stored.rows[0].license_key_ciphertext, null)
+  assert.equal(stored.rows[0].license_key_hmac, null)
+  assert.ok(stored.rows[0].windows_license_key_ciphertext)
+  assert.equal(stored.rows[0].windows_license_key_hmac.length, 32)
   assert.equal(stored.rows[0].action, 'EMPLOYEE_RESUBMITTED')
   assert.equal(stored.rows[0].remarks, 'Updated requested details')
   assert.equal(stored.rows[0].audit_count, 1)
@@ -263,7 +310,7 @@ test('engineer edits permitted fields only in PENDING_ENGINEER and increments ve
   const edited = await api(`/engineer/requests/${request.request_id}`, engineer.token, {
     method: 'PATCH', body: {
       expectedVersion: 1, modelNumber: 'Engineer edited synthetic model',
-      licenseKey: syntheticKey, remarks: 'Corrected the synthetic model details',
+      officeKey: syntheticKey, remarks: 'Corrected the synthetic model details',
     },
   })
   assert.equal(edited.status, 200)
@@ -275,7 +322,7 @@ test('engineer edits permitted fields only in PENDING_ENGINEER and increments ve
     [request.request_id],
   )
   assert.equal(editAudit.rowCount, 1)
-  assert.deepEqual(editAudit.rows[0].details.changedFields.sort(), ['licenseKey', 'modelNumber'])
+  assert.deepEqual(editAudit.rows[0].details.changedFields.sort(), ['modelNumber', 'officeKey'])
   assert.equal(editAudit.rows[0].details.remarks, 'Corrected the synthetic model details')
   assert.equal(JSON.stringify(editAudit.rows[0].details).includes(syntheticKey), false)
 
@@ -302,6 +349,52 @@ test('engineer edits permitted fields only in PENDING_ENGINEER and increments ve
     method: 'PATCH', body: { expectedVersion: 1, modelNumber: 'Not permitted', remarks: 'Not permitted' },
   })
   assert.equal(wrongStatusEdit.status, 409)
+})
+
+test('typed keys enforce OS rules and changing Windows to macOS is blocked while a Windows key exists', { skip: !integrationReady }, async () => {
+  const employee = await createActor('employee'), engineer = await createActor('engineer')
+  const macRequest = await createRequest(employee, { operatingSystem: 'macOS' })
+  const windowsOnMac = await api(`/engineer/requests/${macRequest.request_id}`, engineer.token, {
+    method: 'PATCH', body: { expectedVersion: 1, windowsKey: 'SYNTHETIC-WIN', remarks: 'Test OS validation' },
+  })
+  assert.equal(windowsOnMac.status, 400)
+  const keyedWindowsRequest = await createRequest(employee, { windowsKey: true })
+  const changeOs = await api(`/engineer/requests/${keyedWindowsRequest.request_id}`, engineer.token, {
+    method: 'PATCH', body: { expectedVersion: 1, operatingSystem: 'macOS', remarks: 'Test key preservation' },
+  })
+  assert.equal(changeOs.status, 409)
+  assert.match((await json(changeOs)).error, /Remove the existing Windows key/)
+})
+
+test('laptop request actor columns are set from app.actor_sap_id on create and update', { skip: !integrationReady }, async () => {
+  const employee = await createActor('employee'), engineer = await createActor('engineer')
+  const client = await pool.connect()
+  let request
+  try {
+    await client.query('BEGIN')
+    await client.query("SELECT set_config('app.actor_sap_id',$1,true)", [employee.sapId])
+    const tag = randomUUID()
+    const inserted = await client.query(
+      `INSERT INTO laptop_requests(owner_employee_id,serial_number,purchase_date,model_number,mac_address,operating_system)
+       VALUES($1,$2,DATE '2025-01-10','Actor trigger synthetic',$3,'Windows') RETURNING request_id,version`,
+      [employee.employeeId, `ACTOR-${tag}`, tag.replaceAll('-', '').slice(0, 12).toUpperCase()],
+    )
+    request = inserted.rows[0]
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally { client.release() }
+  let row = await pool.query('SELECT created_by_sap_id,updated_by_sap_id FROM laptop_requests WHERE request_id=$1', [request.request_id])
+  assert.equal(row.rows[0].created_by_sap_id, employee.sapId)
+  assert.equal(row.rows[0].updated_by_sap_id, employee.sapId)
+  const edit = await api(`/engineer/requests/${request.request_id}`, engineer.token, {
+    method: 'PATCH', body: { expectedVersion: 1, modelNumber: 'Actor updated synthetic model', remarks: 'Actor test edit' },
+  })
+  assert.equal(edit.status, 200)
+  row = await pool.query('SELECT created_by_sap_id,updated_by_sap_id FROM laptop_requests WHERE request_id=$1', [request.request_id])
+  assert.equal(row.rows[0].created_by_sap_id, employee.sapId)
+  assert.equal(row.rows[0].updated_by_sap_id, engineer.sapId)
 })
 
 test('employee or engineer may submit NEEDS_ENGINEER_CORRECTION, but no other status allows a correction transition', { skip: !integrationReady }, async () => {

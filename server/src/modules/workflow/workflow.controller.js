@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { pool } from '../../db/pool.js'
 import { encryptLicenseKey, invoiceStorageDirectory } from '../laptopRequests/laptopRequests.controller.js'
+import { normalizeMacAddress } from '../../utils/macAddress.js'
 
 const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const FIELD_COLUMNS = Object.freeze({
@@ -11,10 +12,13 @@ const FIELD_COLUMNS = Object.freeze({
   macAddress: 'mac_address',
   operatingSystem: 'operating_system',
 })
-const MAC_PATTERN = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i
 
 function httpError(status, message) {
   return Object.assign(new Error(message), { status })
+}
+
+async function setRequestActor(client, req) {
+  await client.query("SELECT set_config('app.actor_sap_id',$1,true)", [req.currentUser.sapId])
 }
 
 function requestIdFrom(req) {
@@ -30,7 +34,7 @@ function readExpectedVersion(body) {
 
 function validatePatch(body, { allowRemarks = false } = {}) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw httpError(400, 'Request body must be a JSON object')
-  const allowed = new Set(['expectedVersion', ...Object.keys(FIELD_COLUMNS), 'licenseKey', ...(allowRemarks ? ['remarks'] : [])])
+  const allowed = new Set(['expectedVersion', ...Object.keys(FIELD_COLUMNS), 'windowsKey', 'officeKey', ...(allowRemarks ? ['remarks'] : [])])
   const unknown = Object.keys(body).find((key) => !allowed.has(key))
   if (unknown) throw httpError(400, `Field is not editable: ${unknown}`)
   const patch = {}
@@ -44,17 +48,20 @@ function validatePatch(body, { allowRemarks = false } = {}) {
       throw httpError(400, 'Purchase date must be a valid YYYY-MM-DD date')
     }
     if (field === 'modelNumber' && (!value || value.length > 255)) throw httpError(400, 'Model number is required and must be at most 255 characters')
-    if (field === 'macAddress' && !MAC_PATTERN.test(value)) throw httpError(400, 'MAC address must use the format 00:11:22:33:44:55')
+    if (field === 'macAddress' && !normalizeMacAddress(value)) throw httpError(400, 'Enter a valid MAC address.')
     if (field === 'operatingSystem' && !['Windows', 'macOS'].includes(value)) throw httpError(400, 'Operating system must be Windows or macOS')
-    patch[field] = { column, value: field === 'macAddress' ? value.toUpperCase() : value }
+    patch[field] = { column, value: field === 'macAddress' ? normalizeMacAddress(value) : value }
   }
-  if (Object.hasOwn(body, 'licenseKey')) {
-    const value = body.licenseKey
-    if (value !== null && typeof value !== 'string') throw httpError(400, 'licenseKey must be text or null')
-    if (typeof value === 'string' && value.trim().length > 512) throw httpError(400, 'License key must be at most 512 characters')
-    const encrypted = encryptLicenseKey(typeof value === 'string' ? value.trim() : '')
-    patch.licenseKey = {
-      columns: ['license_key_ciphertext', 'license_key_nonce', 'license_key_auth_tag', 'license_key_hmac'],
+  for (const [field, keyType, prefix] of [['windowsKey', 'windows', 'windows_license_key'], ['officeKey', 'office', 'office_license_key']]) {
+    if (!Object.hasOwn(body, field)) continue
+    const value = body[field]
+    if (value !== null && typeof value !== 'string') throw httpError(400, `${field} must be text or null`)
+    const text = typeof value === 'string' ? value.trim() : ''
+    if (text.length > 512) throw httpError(400, 'License keys must be at most 512 characters')
+    if (field === 'windowsKey' && body.operatingSystem === 'macOS' && text) throw httpError(400, 'A Windows key cannot be used with macOS')
+    const encrypted = encryptLicenseKey(text, keyType)
+    patch[field] = {
+      columns: [`${prefix}_ciphertext`, `${prefix}_nonce`, `${prefix}_auth_tag`, `${prefix}_hmac`],
       values: [encrypted.ciphertext, encrypted.nonce, encrypted.authTag, encrypted.fingerprint],
     }
   }
@@ -66,7 +73,8 @@ function validatePatch(body, { allowRemarks = false } = {}) {
 
 async function lockRequest(client, requestId, req, expectedVersion) {
   const result = await client.query(
-    `SELECT request_id, owner_employee_id, status, version
+    `SELECT request_id, owner_employee_id, status, version, operating_system,
+       (windows_license_key_ciphertext IS NOT NULL) AS windows_key_present
      FROM laptop_requests WHERE request_id = $1 FOR UPDATE`,
     [requestId],
   )
@@ -76,6 +84,18 @@ async function lockRequest(client, requestId, req, expectedVersion) {
   }
   if (request.version !== expectedVersion) throw httpError(409, 'Request version is out of date; reload and try again')
   return request
+}
+
+function validateOperatingSystemChange(request, patch) {
+  const targetOperatingSystem = patch.operatingSystem?.value ?? request.operating_system
+  if (targetOperatingSystem === 'macOS' && patch.windowsKey?.values?.[0]) {
+    throw httpError(400, 'A Windows key cannot be used with macOS')
+  }
+  if (request.operating_system === 'Windows'
+      && targetOperatingSystem === 'macOS'
+      && request.windows_key_present) {
+    throw httpError(409, 'Remove the existing Windows key before changing the operating system to macOS')
+  }
 }
 
 function buildUpdate(patch, requestId, expectedVersion, status) {
@@ -130,7 +150,7 @@ async function addEditAudit(client, req, { requestId, status, remarks, changedFi
 }
 
 function changedFieldNames(patch) {
-  return Object.keys(patch).map((field) => field === 'licenseKey' ? 'licenseKey' : field)
+  return Object.keys(patch)
 }
 
 function listLimitOffset(query) {
@@ -150,10 +170,19 @@ function requestProjection() {
   r.model_number AS "modelNumber", r.mac_address AS "macAddress",
   r.operating_system AS "operatingSystem", r.status, r.version,
   r.created_at AS "createdAt", r.updated_at AS "updatedAt",
-  EXISTS (SELECT 1 FROM laptop_requests duplicate
-          WHERE duplicate.license_key_hmac = r.license_key_hmac
-            AND duplicate.request_id <> r.request_id
-            AND r.license_key_hmac IS NOT NULL) AS "duplicateLicenseWarning",
+  (r.license_key_ciphertext IS NOT NULL) AS "legacyKeyPresent",
+  (r.windows_license_key_ciphertext IS NOT NULL) AS "windowsKeyPresent",
+  (r.office_license_key_ciphertext IS NOT NULL) AS "officeKeyPresent",
+  (r.windows_license_key_hmac IS NOT NULL AND EXISTS (SELECT 1 FROM laptop_requests duplicate
+          WHERE duplicate.windows_license_key_hmac = r.windows_license_key_hmac
+            AND duplicate.request_id <> r.request_id)) AS "windowsKeyDuplicateWarning",
+  (r.office_license_key_hmac IS NOT NULL AND EXISTS (SELECT 1 FROM laptop_requests duplicate
+          WHERE duplicate.office_license_key_hmac = r.office_license_key_hmac
+            AND duplicate.request_id <> r.request_id)) AS "officeKeyDuplicateWarning",
+  ((r.windows_license_key_hmac IS NOT NULL AND EXISTS (SELECT 1 FROM laptop_requests duplicate
+          WHERE duplicate.windows_license_key_hmac = r.windows_license_key_hmac AND duplicate.request_id <> r.request_id))
+   OR (r.office_license_key_hmac IS NOT NULL AND EXISTS (SELECT 1 FROM laptop_requests duplicate
+          WHERE duplicate.office_license_key_hmac = r.office_license_key_hmac AND duplicate.request_id <> r.request_id))) AS "duplicateLicenseWarning",
   COALESCE((SELECT json_agg(json_build_object(
     'action', h.action, 'remarks', h.remarks, 'oldStatus', h.old_status,
     'newStatus', h.new_status, 'createdAt', h.created_at
@@ -222,8 +251,10 @@ export async function editEngineerRequest(req, res, next) {
     const { patch, remarks } = validatePatch(req.body, { allowRemarks: true })
     if (!remarks) throw httpError(400, 'Remarks are required for engineer edits')
     await client.query('BEGIN')
+    await setRequestActor(client, req)
     const request = await lockRequest(client, requestId, req, expectedVersion)
     if (request.status !== 'PENDING_ENGINEER') throw httpError(409, 'Engineer edits are allowed only while PENDING_ENGINEER')
+    validateOperatingSystemChange(request, patch)
     const update = buildUpdate(patch, requestId, expectedVersion)
     const updated = await client.query(update.sql, update.values)
     await addEditAudit(client, req, {
@@ -246,10 +277,12 @@ export async function submitCorrection(req, res, next) {
     const expectedVersion = readExpectedVersion(req.body)
     const { patch, remarks } = validatePatch(req.body, { allowRemarks: true })
     await client.query('BEGIN')
+    await setRequestActor(client, req)
     const request = await lockRequest(client, requestId, req, expectedVersion)
     const permitted = (request.status === 'NEEDS_EMPLOYEE_CORRECTION' && req.currentUser.role === 'employee')
       || (request.status === 'NEEDS_ENGINEER_CORRECTION' && ['employee', 'engineer'].includes(req.currentUser.role))
     if (!permitted) throw httpError(409, 'Correction is not allowed for this role and request status')
+    validateOperatingSystemChange(request, patch)
     if (request.status === 'NEEDS_EMPLOYEE_CORRECTION') {
       const invoiceResult = await client.query(
         `SELECT EXISTS (
@@ -302,12 +335,14 @@ export async function decideRequest(req, res, next) {
     const actionInput = String(req.body?.action ?? '').trim().toLowerCase()
     const transition = DECISION_TRANSITIONS[req.currentUser.role]?.[actionInput]
     if (!transition) throw httpError(400, 'Action must be approve or reject')
-    const remarks = String(req.body?.remarks ?? '').trim()
-    if (!remarks) throw httpError(400, 'Remarks are required for approval and rejection')
-    if (remarks.length > 2000) throw httpError(400, 'Remarks must be at most 2000 characters')
+    const decisionRemarks = String(req.body?.remarks ?? '').trim()
+    if (actionInput === 'reject' && !decisionRemarks) throw httpError(400, 'Remarks are required for rejection')
+    const remarks = decisionRemarks || null
+    if (decisionRemarks.length > 2000) throw httpError(400, 'Remarks must be at most 2000 characters')
     const keys = Object.keys(req.body ?? {})
     if (keys.some((key) => !['action', 'remarks', 'expectedVersion'].includes(key))) throw httpError(400, 'Unexpected decision field')
     await client.query('BEGIN')
+    await setRequestActor(client, req)
     const request = await lockRequest(client, requestId, req, expectedVersion)
     if (request.status !== transition.oldStatus) throw httpError(409, 'This decision is not allowed for the current request status')
     const update = buildUpdate({}, requestId, expectedVersion, transition.newStatus)

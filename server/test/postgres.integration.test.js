@@ -9,13 +9,16 @@ import { runMigrations } from '../src/db/migrationRunner.js'
 const { Pool } = pg
 const testDatabaseUrl = process.env.TEST_DATABASE_URL
 const baselineDatabaseUrl = process.env.TEST_BASELINE_DATABASE_URL
+const migration007DatabaseUrl = process.env.TEST_MIGRATION_007_DATABASE_URL
 const ready = Boolean(testDatabaseUrl && baselineDatabaseUrl)
 const testPool = ready ? new Pool({ connectionString: testDatabaseUrl, max: 1 }) : null
 const baselinePool = ready ? new Pool({ connectionString: baselineDatabaseUrl, max: 1 }) : null
+const migration007Pool = migration007DatabaseUrl ? new Pool({ connectionString: migration007DatabaseUrl, max: 1 }) : null
+const migration007Ready = Boolean(migration007Pool)
 const migrationsDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../src/db/migrations')
 
 after(async () => {
-  await Promise.all([testPool?.end(), baselinePool?.end()])
+  await Promise.all([testPool?.end(), baselinePool?.end(), migration007Pool?.end()])
 })
 
 test('integration URLs point only to dedicated migration test databases', { skip: !ready }, async () => {
@@ -37,6 +40,10 @@ test('migration runner baselines an existing 001 schema on PostgreSQL', { skip: 
   const clearanceSql = await readFile(path.join(migrationsDirectory, '004_retirement_clearances.sql'), 'utf8')
   const invoiceSql = await readFile(path.join(migrationsDirectory, '005_invoice_superseding.sql'), 'utf8')
   const sapIdSql = await readFile(path.join(migrationsDirectory, '006_sap_id_eight_characters.sql'), 'utf8')
+  const macClearanceSql = await readFile(path.join(migrationsDirectory, '007_mac_address_and_clearance_checks.sql'), 'utf8')
+  const clearanceReasonSql = await readFile(path.join(migrationsDirectory, '008_retirement_clearance_reason.sql'), 'utf8')
+  const typedKeysSql = await readFile(path.join(migrationsDirectory, '009_typed_license_keys.sql'), 'utf8')
+  const requestActorsSql = await readFile(path.join(migrationsDirectory, '010_laptop_request_actor_sap_ids.sql'), 'utf8')
   const executedSql = []
   const tracedPool = {
     async connect() {
@@ -60,9 +67,75 @@ test('migration runner baselines an existing 001 schema on PostgreSQL', { skip: 
   assert.equal(executedSql.some((sql) => sql.trim() === clearanceSql.trim()), true)
   assert.equal(executedSql.some((sql) => sql.trim() === invoiceSql.trim()), true)
   assert.equal(executedSql.some((sql) => sql.trim() === sapIdSql.trim()), true)
+  assert.equal(executedSql.some((sql) => sql.trim() === macClearanceSql.trim()), true)
+  assert.equal(executedSql.some((sql) => sql.trim() === clearanceReasonSql.trim()), true)
+  assert.equal(executedSql.some((sql) => sql.trim() === typedKeysSql.trim()), true)
+  assert.equal(executedSql.some((sql) => sql.trim() === requestActorsSql.trim()), true)
 
   const rows = await baselinePool.query('SELECT version FROM schema_migrations ORDER BY version')
-  assert.deepEqual(rows.rows.map((row) => row.version), ['001', '002', '003', '004', '005', '006'])
+  assert.deepEqual(rows.rows.map((row) => row.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010'])
+})
+
+test('migration 007 normalizes an APPROVED colon-MAC request, restores its lock trigger, and writes SYSTEM audit', { skip: !migration007Ready }, async () => {
+  const database = await migration007Pool.query('SELECT current_database() AS name')
+  assert.match(database.rows[0].name, /^lms_migration_007_test_\d{8}_[a-f0-9]{8}$/)
+  const clearances = await migration007Pool.query(
+    `SELECT clearance_id FROM retirement_clearances WHERE created_by_sap_id='MIGSEED'`,
+  )
+  assert.equal(clearances.rowCount, 1)
+  const clearanceId = clearances.rows[0].clearance_id
+  const oldChecks = await migration007Pool.query(
+    `SELECT check_id,check_key,is_mandatory FROM retirement_clearance_checks
+     WHERE clearance_id=$1 AND check_key IN ('asset_return','license_check','old_extra') ORDER BY check_key`,
+    [clearanceId],
+  )
+  assert.equal(oldChecks.rowCount, 3)
+  assert.ok(oldChecks.rows.every((row) => row.is_mandatory === false))
+  const newChecks = await migration007Pool.query(
+    `SELECT check_key,is_mandatory,is_complete FROM retirement_clearance_checks
+     WHERE clearance_id=$1 AND check_key IN ('company_software_removal','antivirus_removal') ORDER BY check_key`,
+    [clearanceId],
+  )
+  assert.deepEqual(newChecks.rows.map((row) => row.check_key), ['antivirus_removal','company_software_removal'])
+  assert.ok(newChecks.rows.every((row) => row.is_mandatory && !row.is_complete))
+  const audit = await migration007Pool.query(
+    `SELECT COUNT(*)::int AS count FROM audit_log
+     WHERE actor_sap_id='SYSTEM' AND action='retirement_check_updated'
+       AND entity_type='retirement_clearance_check' AND entity_id=ANY($1::text[])
+       AND details->'changedFields' ? 'isMandatory'`,
+    [oldChecks.rows.map((row) => row.check_id)],
+  )
+  assert.equal(audit.rows[0].count, 3)
+  const mac = await migration007Pool.query(
+    `SELECT request_id,mac_address FROM laptop_requests
+     WHERE owner_employee_id=(SELECT employee_id FROM retirement_clearances WHERE clearance_id=$1)`,
+    [clearanceId],
+  )
+  assert.equal(mac.rowCount, 1)
+  assert.equal(mac.rows[0].mac_address, '02AA00000007')
+  assert.match(mac.rows[0].mac_address, /^[0-9A-F]{12}$/)
+
+  const trigger = await migration007Pool.query(
+    `SELECT tgenabled FROM pg_trigger
+     WHERE tgrelid='laptop_requests'::regclass
+       AND tgname='laptop_requests_lock_approved' AND NOT tgisinternal`,
+  )
+  assert.equal(trigger.rowCount, 1)
+  assert.equal(trigger.rows[0].tgenabled, 'O')
+  await assert.rejects(
+    migration007Pool.query(
+      'UPDATE laptop_requests SET model_number=$1 WHERE request_id=$2',
+      ['Changed after migration', mac.rows[0].request_id],
+    ),
+    (error) => error.message.includes('approved laptop requests cannot be updated'),
+  )
+
+  const migrationAudit = await migration007Pool.query(
+    `SELECT COUNT(*)::int AS count FROM audit_log
+     WHERE actor_sap_id='SYSTEM' AND action='migration_007_mac_normalized'
+       AND entity_type='schema_migration' AND entity_id='007'`,
+  )
+  assert.equal(migrationAudit.rows[0].count, 1)
 })
 
 async function withRollbackTransaction(callback) {
@@ -104,10 +177,10 @@ async function insertEmployee(client) {
 
 async function insertLaptopRequest(client, employeeId, overrides = {}) {
   const tag = crypto.randomUUID()
-  const macSuffix = tag.replaceAll('-', '').slice(0, 10).toUpperCase().match(/.{2}/g).join(':')
+  const macSuffix = tag.replaceAll('-', '').slice(0, 12).toUpperCase()
   const defaults = {
     serialNumber: `SER-${tag}`,
-    macAddress: `02:${macSuffix}`,
+    macAddress: macSuffix,
     status: 'PENDING_ENGINEER',
     licenseKeyHmac: null,
     licenseKeyCiphertext: null,
@@ -229,12 +302,12 @@ test('PostgreSQL rejects serial duplicates after case and whitespace normalizati
   })
 })
 
-test('PostgreSQL rejects MAC duplicates that differ only by letter case', { skip: !ready }, async () => {
+test('PostgreSQL rejects duplicate canonical MAC addresses', { skip: !ready }, async () => {
   await withRollbackTransaction(async (client) => {
     const { employeeId } = await insertEmployee(client)
-    await insertLaptopRequest(client, employeeId, { macAddress: '02:AA:00:00:00:01' })
+    await insertLaptopRequest(client, employeeId, { macAddress: '02AA00000001' })
     await assert.rejects(
-      insertLaptopRequest(client, employeeId, { macAddress: '02:aa:00:00:00:01' }),
+      insertLaptopRequest(client, employeeId, { macAddress: '02AA00000001' }),
       (error) => error.code === '23505',
     )
   })
@@ -250,6 +323,22 @@ test('PostgreSQL rejects an invalid MAC address format', { skip: !ready }, async
   })
 })
 
+test('PostgreSQL requires the normalized uppercase 12-character MAC representation', { skip: !ready }, async () => {
+  await withRollbackTransaction(async (client) => {
+    const { employeeId } = await insertEmployee(client)
+    for (const [index, macAddress] of ['02aa00000001', '02AA0000000G', '02AA000001'].entries()) {
+      const savepoint = `invalid_mac_${index}`
+      await client.query(`SAVEPOINT ${savepoint}`)
+      await assert.rejects(
+        insertLaptopRequest(client, employeeId, { macAddress }),
+        (error) => error.code === '23514',
+      )
+      await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`)
+      await client.query(`RELEASE SAVEPOINT ${savepoint}`)
+    }
+  })
+})
+
 test('PostgreSQL rejects partially populated encrypted license-key fields', { skip: !ready }, async () => {
   await withRollbackTransaction(async (client) => {
     const { employeeId } = await insertEmployee(client)
@@ -257,6 +346,35 @@ test('PostgreSQL rejects partially populated encrypted license-key fields', { sk
       insertLaptopRequest(client, employeeId, { licenseKeyCiphertext: Buffer.from('ciphertext') }),
       (error) => error.code === '23514',
     )
+  })
+})
+
+test('PostgreSQL enforces typed key completeness and permits an Office key on macOS', { skip: !ready }, async () => {
+  await withRollbackTransaction(async (client) => {
+    const { employeeId } = await insertEmployee(client)
+    const insertTyped = (os, type, partial = false) => {
+      const tag = crypto.randomUUID()
+      const columns = type === 'windows' ? [
+        'windows_license_key_ciphertext', 'windows_license_key_nonce', 'windows_license_key_auth_tag', 'windows_license_key_hmac',
+      ] : [
+        'office_license_key_ciphertext', 'office_license_key_nonce', 'office_license_key_auth_tag', 'office_license_key_hmac',
+      ]
+      const values = partial
+        ? [Buffer.from('synthetic-ciphertext'), null, null, null]
+        : [Buffer.from('synthetic-ciphertext'), Buffer.alloc(12, 1), Buffer.alloc(16, 2), Buffer.alloc(32, 3)]
+      return client.query(`INSERT INTO laptop_requests(owner_employee_id,serial_number,purchase_date,model_number,mac_address,operating_system,${columns.join(',')})
+        VALUES($1,$2,CURRENT_DATE,'Typed key test',$3,$4,$5,$6,$7,$8)`,
+      [employeeId, `TYPED-${tag}`, tag.replaceAll('-', '').slice(0, 12).toUpperCase(), os, ...values])
+    }
+    await client.query('SAVEPOINT typed_partial')
+    await assert.rejects(insertTyped('Windows', 'windows', true), (error) => error.code === '23514')
+    await client.query('ROLLBACK TO SAVEPOINT typed_partial')
+    await client.query('RELEASE SAVEPOINT typed_partial')
+    await client.query('SAVEPOINT windows_on_mac')
+    await assert.rejects(insertTyped('macOS', 'windows'), (error) => error.code === '23514')
+    await client.query('ROLLBACK TO SAVEPOINT windows_on_mac')
+    await client.query('RELEASE SAVEPOINT windows_on_mac')
+    await insertTyped('macOS', 'office')
   })
 })
 

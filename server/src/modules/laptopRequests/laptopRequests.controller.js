@@ -5,20 +5,21 @@ import { fileURLToPath } from 'node:url'
 import { pool } from '../../db/pool.js'
 import { env } from '../../config/env.js'
 import { detectInvoiceType, parseInvoiceMultipart } from './multipart.js'
+import { normalizeMacAddress } from '../../utils/macAddress.js'
 
 export const invoiceStorageDirectory = env.invoiceStorageDir
   ? path.resolve(env.invoiceStorageDir)
   : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../private-invoices')
-const MAC_PATTERN = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i
-
 function validateLaptopFields(fields) {
+  const macAddress = normalizeMacAddress(fields.macAddress)
   const values = {
     serialNumber: String(fields.serialNumber ?? '').trim(),
     purchaseDate: String(fields.purchaseDate ?? '').trim(),
     modelNumber: String(fields.modelNumber ?? '').trim(),
-    macAddress: String(fields.macAddress ?? '').trim().toUpperCase(),
+    macAddress,
     operatingSystem: String(fields.operatingSystem ?? '').trim(),
-    licenseKey: String(fields.licenseKey ?? '').trim(),
+    windowsKey: String(fields.windowsKey ?? '').trim(),
+    officeKey: String(fields.officeKey ?? '').trim(),
   }
   if (!values.serialNumber || values.serialNumber.length > 255) throw httpError(400, 'Serial number is required and must be at most 255 characters')
   if (!/^\d{4}-\d{2}-\d{2}$/.test(values.purchaseDate) || Number.isNaN(Date.parse(`${values.purchaseDate}T00:00:00Z`))
@@ -26,9 +27,10 @@ function validateLaptopFields(fields) {
     throw httpError(400, 'Purchase date must be a valid YYYY-MM-DD date')
   }
   if (!values.modelNumber || values.modelNumber.length > 255) throw httpError(400, 'Model number is required and must be at most 255 characters')
-  if (!MAC_PATTERN.test(values.macAddress)) throw httpError(400, 'MAC address must use the format 00:11:22:33:44:55')
+  if (!values.macAddress) throw httpError(400, 'Enter a valid MAC address.')
   if (!['Windows', 'macOS'].includes(values.operatingSystem)) throw httpError(400, 'Operating system must be Windows or macOS')
-  if (values.licenseKey.length > 512) throw httpError(400, 'License key must be at most 512 characters')
+  if (values.windowsKey.length > 512 || values.officeKey.length > 512) throw httpError(400, 'License keys must be at most 512 characters')
+  if (values.operatingSystem === 'macOS' && values.windowsKey) throw httpError(400, 'A Windows key cannot be used with macOS')
   return values
 }
 
@@ -39,14 +41,15 @@ function decodeSecret(value, name) {
   return decoded
 }
 
-export function encryptLicenseKey(licenseKey) {
+export function encryptLicenseKey(licenseKey, keyType = 'legacy') {
   if (!licenseKey) return { ciphertext: null, nonce: null, authTag: null, fingerprint: null }
+  if (!['windows', 'office', 'legacy'].includes(keyType)) throw httpError(400, 'Invalid license key type')
   const encryptionKey = decodeSecret(env.licenseEncryptionKey, 'LICENSE_ENCRYPTION_KEY')
   const hmacKey = decodeSecret(env.licenseHmacKey, 'LICENSE_HMAC_KEY')
   const nonce = randomBytes(12)
   const cipher = createCipheriv('aes-256-gcm', encryptionKey, nonce)
   const ciphertext = Buffer.concat([cipher.update(licenseKey, 'utf8'), cipher.final()])
-  const fingerprint = createHmac('sha256', hmacKey).update(licenseKey).digest()
+  const fingerprint = createHmac('sha256', hmacKey).update(keyType).update('\0').update(licenseKey).digest()
   return { ciphertext, nonce, authTag: cipher.getAuthTag(), fingerprint }
 }
 
@@ -96,20 +99,28 @@ export async function createLaptopRequest(req, res, next) {
   const client = await pool.connect()
   try {
     const { laptop, invoice, detected } = await parseRequest(req)
-    const license = encryptLicenseKey(laptop.licenseKey)
+    const windowsLicense = encryptLicenseKey(laptop.windowsKey, 'windows')
+    const officeLicense = encryptLicenseKey(laptop.officeKey, 'office')
     const fileId = randomUUID()
     const storageKey = `${randomUUID()}${detected.extension}`
     const metadata = invoiceRow(invoice, detected, fileId, storageKey, req.currentUser.userId)
     await client.query('BEGIN')
+    await client.query("SELECT set_config('app.actor_sap_id',$1,true)", [req.currentUser.sapId])
     const inserted = await client.query(
       `INSERT INTO laptop_requests
          (owner_employee_id, serial_number, purchase_date, model_number, mac_address,
-          operating_system, license_key_ciphertext, license_key_nonce, license_key_auth_tag, license_key_hmac)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          operating_system, windows_license_key_ciphertext, windows_license_key_nonce,
+          windows_license_key_auth_tag, windows_license_key_hmac,
+          office_license_key_ciphertext, office_license_key_nonce,
+          office_license_key_auth_tag, office_license_key_hmac)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING request_id, serial_number, purchase_date, model_number, mac_address,
-         operating_system, status, version, created_at, updated_at`,
+         operating_system, status, version, created_at, updated_at,
+         (license_key_ciphertext IS NOT NULL) AS legacy_key_present`,
       [req.currentUser.employeeId, laptop.serialNumber, laptop.purchaseDate, laptop.modelNumber,
-        laptop.macAddress, laptop.operatingSystem, license.ciphertext, license.nonce, license.authTag, license.fingerprint],
+        laptop.macAddress, laptop.operatingSystem,
+        windowsLicense.ciphertext, windowsLicense.nonce, windowsLicense.authTag, windowsLicense.fingerprint,
+        officeLicense.ciphertext, officeLicense.nonce, officeLicense.authTag, officeLicense.fingerprint],
     )
     const request = inserted.rows[0]
     await client.query(
@@ -156,6 +167,7 @@ export async function uploadRequestInvoice(req, res, next) {
       throw httpError(400, 'expectedVersion must be a positive integer')
     }
     await client.query('BEGIN')
+    await client.query("SELECT set_config('app.actor_sap_id',$1,true)", [req.currentUser.sapId])
     const requestResult = await client.query(
       `SELECT request_id, owner_employee_id, status, version FROM laptop_requests
        WHERE request_id = $1 FOR UPDATE`,
@@ -219,6 +231,15 @@ export async function listOwnLaptopRequests(req, res, next) {
               r.purchase_date AS "purchaseDate", r.model_number AS "modelNumber",
               r.mac_address AS "macAddress", r.operating_system AS "operatingSystem",
               r.status, r.version, r.created_at AS "createdAt", r.updated_at AS "updatedAt",
+              (r.license_key_ciphertext IS NOT NULL) AS "legacyKeyPresent",
+              (r.windows_license_key_ciphertext IS NOT NULL) AS "windowsKeyPresent",
+              (r.office_license_key_ciphertext IS NOT NULL) AS "officeKeyPresent",
+              (r.windows_license_key_hmac IS NOT NULL AND EXISTS (
+                SELECT 1 FROM laptop_requests d WHERE d.windows_license_key_hmac=r.windows_license_key_hmac AND d.request_id<>r.request_id
+              )) AS "windowsKeyDuplicateWarning",
+              (r.office_license_key_hmac IS NOT NULL AND EXISTS (
+                SELECT 1 FROM laptop_requests d WHERE d.office_license_key_hmac=r.office_license_key_hmac AND d.request_id<>r.request_id
+              )) AS "officeKeyDuplicateWarning",
               COALESCE((
                 SELECT json_agg(json_build_object(
                   'action', h.action, 'remarks', h.remarks, 'oldStatus', h.old_status,

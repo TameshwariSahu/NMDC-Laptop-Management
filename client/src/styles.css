@@ -198,6 +198,7 @@ html[data-theme='dark'] .theme-button { white-space: nowrap; }
 .empty-state p { max-width: 210px; color: #9aa4b3; font-size: 11px; line-height: 1.5; margin: 5px 0 0; }
 .inline-success { padding: 9px 11px; color: #237c5b; background: #eaf7f0; border: 1px solid #d7eee2; border-radius: 7px; font-size: 12px; margin-bottom: 12px; }
 .form-error { padding: 9px 11px; color: #ad4146; background: #fff0ef; border: 1px solid #f4d9d8; border-radius: 7px; font-size: 12px; margin-bottom: 12px; }
+.field-error { color: #ad4146; font-size: 12px; margin: -6px 0 4px; }
 .invoice-replacement-notice { margin-top: 10px; padding: 9px 11px; color: #946817; background: #fff8e9; border: 1px solid #f2e5c5; border-radius: 7px; font-size: 11px; line-height: 1.5; }
 
 /* Review workspace */
@@ -281,8 +282,15 @@ td strong { color: #46536a; font-weight: 600; }
 .queue-paging button:disabled { opacity: .4; }
 .table-subline { display: block; margin-top: 4px; color: #9aa4b3; font-size: 10px; }
 .warning-badge { display: inline-block; padding: 5px 8px; background: #fff3dc; border-radius: 20px; color: #a8781c; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.legacy-key-label { display: inline-block; width: fit-content; padding: 4px 8px; border-radius: 14px; background: #edf0f4; color: #586477; font-size: 11px; font-weight: 700; }
+.key-clear-option { display: flex; align-items: flex-start; gap: 8px; }
+.key-clear-option input { width: auto; margin-top: 2px; }
+.clearance-reason { display: flex; align-items: center; gap: 12px; }
+.clearance-reason select { min-width: 190px; }
+.report-key-check { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
 .clear-badge { color: #418365; font-size: 11px; }
 .report-period { color: #8592a7; background: #f3f5f9; padding: 6px 8px; border-radius: 5px; font-size: 10px; font-weight: 700; letter-spacing: .08em; }
+.report-toolbar-actions { display: flex; align-items: center; gap: 10px; }
 .clearance-search, .clearance-result { max-width: 760px; padding: 21px 23px; }
 .clearance-icon { width: 37px; height: 37px; border-radius: 10px; background: #eef3ff; color: #5573cc; display: grid; place-items: center; font-size: 17px; }
 .search-form { display: flex; align-items: flex-end; gap: 11px; }

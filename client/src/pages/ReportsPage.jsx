@@ -13,6 +13,7 @@ export default function ReportsPage() {
   const [activeFilters, setActiveFilters] = useState(initialFilters)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [exporting, setExporting] = useState(false)
   async function refresh(offset = pagination.offset, query = activeFilters) {
     setLoading(true); setError('')
     try {
@@ -23,6 +24,12 @@ export default function ReportsPage() {
   }
   useEffect(() => { refresh(0, initialFilters) }, [user.role])
   function apply(event) { event.preventDefault(); setActiveFilters(filters); refresh(0, filters) }
+  async function downloadExcel() {
+    setExporting(true); setError('')
+    try { await laptopApi.downloadReportExcel(activeFilters) }
+    catch (e) { setError(e.message) }
+    finally { setExporting(false) }
+  }
   const duplicateCount = reports.filter((r) => r.duplicateKeyWarning).length
   const approvedCount = reports.filter((r) => r.status === 'APPROVED').length
   return <div className="page-stack">
@@ -37,8 +44,8 @@ export default function ReportsPage() {
       <label>License key<select value={filters.duplicateOnly} onChange={(e) => setFilters({ ...filters, duplicateOnly: e.target.value })}><option value="">All</option><option value="true">Duplicates only</option><option value="false">No filter</option></select></label>
       <button className="button button-primary">Apply filters</button>
     </form>
-    <div className="surface table-surface"><div className="table-toolbar"><div><strong>Registration activity</strong><span>Duplicate matches are warnings for investigation, not proof of misuse.</span></div><span className="report-period">{pagination.total} RECORDS</span></div>
-      {loading ? <p className="table-message">Loading reports…</p> : reports.length ? <div className="table-scroll"><table><thead><tr><th>REQUEST</th><th>EMPLOYEE</th><th>DEVICE</th><th>STATUS</th><th>MS KEY CHECK</th></tr></thead><tbody>{reports.map((r) => <tr key={r.id}><td className="mono-cell">{r.id}</td><td><strong>{r.employeeName}</strong><small className="table-subline">{r.employeeSapId}</small></td><td><strong>{r.modelNumber}</strong><small className="table-subline">{r.serialNumber}</small></td><td><StatusBadge status={r.status} /></td><td>{r.duplicateKeyWarning ? <span className="warning-badge">⚠ Duplicate match</span> : <span className="clear-badge">✓ No match</span>}</td></tr>)}</tbody></table></div> : <EmptyState title="No report data" detail="No registrations match these filters." />}
+    <div className="surface table-surface"><div className="table-toolbar"><div><strong>Registration activity</strong><span>Duplicate matches are warnings for investigation, not proof of misuse.</span></div><div className="report-toolbar-actions"><span className="report-period">{pagination.total} RECORDS</span>{user.role === 'admin' && <button className="button button-primary button-small" type="button" disabled={exporting} onClick={downloadExcel}>{exporting ? 'Preparing…' : 'Download Excel'}</button>}</div></div>
+      {loading ? <p className="table-message">Loading reports…</p> : reports.length ? <div className="table-scroll"><table><thead><tr><th>SERIAL NUMBER</th><th>EMPLOYEE</th><th>DEVICE</th><th>STATUS</th><th>MS KEY CHECK</th></tr></thead><tbody>{reports.map((r) => <tr key={r.id}><td className="mono-cell">{r.serialNumber}</td><td><strong>{r.employeeName}</strong><small className="table-subline">{r.employeeSapId}</small><small className="table-subline">{r.department || '—'}</small></td><td><strong>{r.modelNumber}</strong></td><td><StatusBadge status={r.status} /></td><td className="report-key-check">{r.windowsKeyPresent && <span>Windows: {r.windowsKeyDuplicateWarning ? <span className="warning-badge">Duplicate</span> : <span className="clear-badge">No match</span>}</span>}{r.officeKeyPresent && <span>MS Office: {r.officeKeyDuplicateWarning ? <span className="warning-badge">Duplicate</span> : <span className="clear-badge">No match</span>}</span>}{r.legacyKeyPresent && <span className="legacy-key-label">Legacy key</span>}{!r.windowsKeyPresent && !r.officeKeyPresent && !r.legacyKeyPresent && <span>—</span>}</td></tr>)}</tbody></table></div> : <EmptyState title="No report data" detail="No registrations match these filters." />}
       <div className="pagination-row"><span>{pagination.total ? `${pagination.offset + 1}–${Math.min(pagination.offset + pagination.limit, pagination.total)} of ${pagination.total}` : '0 records'}</span><div><button className="button button-quiet button-small" disabled={!pagination.offset || loading} onClick={() => refresh(Math.max(0, pagination.offset - pagination.limit))}>Previous</button><button className="button button-quiet button-small" disabled={pagination.offset + pagination.limit >= pagination.total || loading} onClick={() => refresh(pagination.offset + pagination.limit)}>Next</button></div></div>
     </div>
   </div>

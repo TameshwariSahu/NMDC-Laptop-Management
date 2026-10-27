@@ -1,4 +1,5 @@
 import { apiBlob, apiFetch } from '../api.js'
+import { normalizeMacAddress } from '../utils/macAddress.js'
 
 function normalizeRequest(row) {
   const history = row.history ?? []
@@ -12,7 +13,7 @@ function normalizeRequest(row) {
     macAddress: row.macAddress ?? row.mac_address,
     operatingSystem: row.operatingSystem ?? row.operating_system,
     invoiceName: invoices.at(-1)?.originalName ?? '',
-    duplicateKeyWarning: Boolean(row.duplicateLicenseWarning),
+    duplicateKeyWarning: Boolean(row.duplicateLicenseWarning || row.windowsKeyDuplicateWarning || row.officeKeyDuplicateWarning),
     remarks: history.filter((item) => item.remarks).map((item) => ({
       actor: item.action?.replaceAll('_', ' ') ?? 'Reviewer',
       date: item.createdAt ? new Date(item.createdAt).toLocaleDateString() : '',
@@ -26,10 +27,13 @@ function correctionFields(form) {
     serialNumber: form.serialNumber,
     purchaseDate: form.purchaseDate,
     modelNumber: form.modelNumber,
-    macAddress: form.macAddress,
+    macAddress: normalizeMacAddress(form.macAddress) ?? form.macAddress,
     operatingSystem: form.operatingSystem,
   }
-  if (form.msLicenseKey?.trim()) body.licenseKey = form.msLicenseKey.trim()
+  if (form.clearWindowsKey) body.windowsKey = null
+  else if (form.windowsKey?.trim()) body.windowsKey = form.windowsKey.trim()
+  if (form.clearOfficeKey) body.officeKey = null
+  else if (form.officeKey?.trim()) body.officeKey = form.officeKey.trim()
   return body
 }
 
@@ -151,10 +155,26 @@ export const laptopApi = {
     return { ...result, reports: result.reports.map(normalizeRequest) }
   },
 
-  async listAccounts({ limit = 50, offset = 0, q = '' } = {}) {
+  async downloadReportExcel(filters = {}) {
+    const params = new URLSearchParams()
+    for (const name of ['status', 'sapId', 'from', 'to', 'duplicateOnly']) {
+      if (filters[name]) params.set(name, filters[name])
+    }
+    const blob = await apiBlob(`/admin/reports/export.xlsx?${params}`)
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `laptop-report-${new Date().toISOString().slice(0, 10)}.xlsx`
+    document.body.append(anchor)
+    anchor.click()
+    anchor.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
+  },
+
+  async listAccounts({ limit = 25, offset = 0, q = '' } = {}) {
     const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
     if (q) params.set('q', q)
-    return (await apiFetch(`/admin/accounts?${params}`)).accounts
+    return apiFetch(`/admin/accounts?${params}`)
   },
 
   async createAccount(account) {
@@ -169,19 +189,15 @@ export const laptopApi = {
     return (await apiFetch(`/admin/retirement-clearances?sapId=${encodeURIComponent(sapId)}`)).clearances
   },
 
-  async createClearance(sapId) {
-    return (await apiFetch('/admin/retirement-clearances', { method: 'POST', body: { sapId } })).clearance
-  },
-
-  async addClearanceCheck(clearanceId, check) {
-    return (await apiFetch(`/admin/retirement-clearances/${clearanceId}/checks`, { method: 'POST', body: check })).check
+  async createClearance(sapId, reason) {
+    return (await apiFetch('/admin/retirement-clearances', { method: 'POST', body: { sapId, reason } })).clearance
   },
 
   async updateClearanceCheck(clearanceId, checkId, patch) {
     return (await apiFetch(`/admin/retirement-clearances/${clearanceId}/checks/${checkId}`, { method: 'PATCH', body: patch })).check
   },
 
-  async finalizeClearance(clearanceId, remarks) {
-    return (await apiFetch(`/admin/retirement-clearances/${clearanceId}/clear`, { method: 'POST', body: { remarks } })).clearance
+  async finalizeClearance(clearanceId, remarks, reason) {
+    return (await apiFetch(`/admin/retirement-clearances/${clearanceId}/clear`, { method: 'POST', body: { remarks, reason } })).clearance
   },
 }

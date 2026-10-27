@@ -20,10 +20,13 @@ export async function listAccounts(req, res, next) {
     const q = String(req.query.q ?? '').trim()
     const values = q ? [`%${q}%`, limit, offset] : [limit, offset]
     const filter = q ? 'WHERE u.sap_id ILIKE $1 OR u.email ILIKE $1 OR e.employee_name ILIKE $1' : ''
-    const rows = await pool.query(`SELECT u.user_id AS "userId",u.sap_id AS "sapId",u.email,u.role,u.is_active AS "isActive",
+    const [rows, count] = await Promise.all([
+      pool.query(`SELECT u.user_id AS "userId",u.sap_id AS "sapId",u.email,u.role,u.is_active AS "isActive",
       e.employee_name AS "employeeName",e.designation,e.employee_category AS "employeeCategory",e.department,u.created_at AS "createdAt"
-      FROM users u LEFT JOIN employees e ON e.user_id=u.user_id ${filter} ORDER BY u.created_at DESC LIMIT $${values.length-1} OFFSET $${values.length}`, values)
-    return res.json({ accounts: rows.rows, pagination: { limit, offset } })
+      FROM users u LEFT JOIN employees e ON e.user_id=u.user_id ${filter} ORDER BY u.created_at DESC LIMIT $${q ? 2 : 1} OFFSET $${q ? 3 : 2}`, values),
+      pool.query(`SELECT COUNT(*)::INTEGER AS total FROM users u LEFT JOIN employees e ON e.user_id=u.user_id ${filter}`, q ? [values[0]] : []),
+    ])
+    return res.json({ accounts: rows.rows, pagination: { limit, offset, total: count.rows[0].total } })
   } catch (error) { return next(error) }
 }
 export async function createAccount(req, res, next) {

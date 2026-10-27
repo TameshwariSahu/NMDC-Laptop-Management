@@ -21,12 +21,12 @@ Act as a senior full-stack developer and help me build a secure, maintainable La
 **Engineer**
 - View pending laptop requests.
 - Review laptop details and invoices.
-- Edit permitted details and approve or reject with a mandatory reason.
+- Edit permitted details, approve with optional remarks, or reject with mandatory remarks.
 - View transaction reports and duplicate MS-key warnings.
 
 **Admin**
 - Manage employee, engineer and admin accounts.
-- Review engineer-approved requests and give final approval or rejection.
+- Review engineer-approved requests and give final approval with optional remarks or rejection with mandatory remarks.
 - View transaction reports and duplicate MS-key warnings.
 - Manage employee retirement/no-dues clearance.
 
@@ -54,7 +54,7 @@ Laptop fields: serial number, purchase date, model number, MAC address, operatin
 - Add audit logs and validate all inputs.
 
 ## 6. Retirement clearance
-Allow Admin to find an employee by SAP ID and track asset return, license checks and other required no-dues checks. Clearance must remain blocked until all mandatory checks are complete and an authorized officer records clearance. Keep license deactivation/reassignment consistent with the organization's actual policy.
+Allow Admin to find an employee by SAP ID and track removal of company-installed software and antivirus. Clearance must remain blocked until both mandatory checks are complete and an authorized officer records clearance. Keep license deactivation/reassignment consistent with the organization's actual policy.
 
 ## 7. How I want you to work
 I am learning full-stack development, so explain important decisions in simple language.

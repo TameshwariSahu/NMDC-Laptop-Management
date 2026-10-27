@@ -14,15 +14,14 @@ export async function requestOtp(req, res, next) {
     const { rows } = await pool.query(
       `SELECT user_id, email FROM users WHERE upper(sap_id) = $1 AND is_active = TRUE`, [sapId],
     )
-    // Avoid revealing whether an account exists.
-    if (!rows[0]) return res.json({ message: 'If the account is active, a login code has been sent to its registered email.' })
+    if (!rows[0]) return res.status(404).json({ error: 'Account does not exist. Please contact the admin.' })
 
     const otp = String(randomInt(0, 1_000_000)).padStart(6, '0')
     const expiresAt = new Date(Date.now() + env.otpTtlMinutes * 60_000)
     await pool.query('UPDATE login_otps SET consumed_at = NOW() WHERE user_id = $1 AND consumed_at IS NULL', [rows[0].user_id])
     await pool.query('INSERT INTO login_otps (user_id, otp_hash, expires_at) VALUES ($1, $2, $3)', [rows[0].user_id, hashOtp(otp), expiresAt])
     await sendLoginOtp(rows[0].email, otp)
-    return res.json({ message: 'If the account is active, a login code has been sent to its registered email.' })
+    return res.json({ message: 'A login code has been sent to your registered email.' })
   } catch (error) {
     return next(error)
   }

@@ -58,7 +58,8 @@ function formData(overrides = {}, fileBytes = Buffer.from('%PDF-1.4\nsynthetic i
     modelNumber: 'Synthetic Model 100',
     macAddress: `02:${randomUUID().replaceAll('-', '').slice(0, 10).match(/.{2}/g).join(':')}`,
     operatingSystem: 'Windows',
-    licenseKey: '',
+    windowsKey: '',
+    officeKey: '',
     ...overrides,
   }
   for (const [key, value] of Object.entries(values)) form.set(key, value)
@@ -82,13 +83,56 @@ test('authentication rejects SAP IDs that are not exactly eight characters', { s
   assert.equal(response.status, 400)
 })
 
-test('employee registration validates inputs, encrypts license keys, stores a private invoice, and lists only owned requests', { skip: !integrationReady }, async () => {
+test('unknown and deactivated SAP IDs return the same error; deactivated accounts receive no OTP and old sessions fail', { skip: !integrationReady }, async () => {
+  const employee = await createEmployee()
+  await pool.query('UPDATE users SET is_active = FALSE WHERE user_id = $1', [employee.userId])
+  const otpCountBefore = await pool.query('SELECT COUNT(*)::int AS n FROM login_otps WHERE user_id = $1', [employee.userId])
+  const authBase = baseUrl.replace(/\/employee$/, '')
+  async function requestOtp(sapId) {
+    return fetch(`${authBase}/auth/request-otp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sapId }),
+    })
+  }
+  const unknown = await requestOtp('ZZ000001')
+  const deactivated = await requestOtp((await pool.query('SELECT sap_id FROM users WHERE user_id=$1', [employee.userId])).rows[0].sap_id)
+  assert.equal(unknown.status, 404)
+  assert.equal(deactivated.status, 404)
+  const unknownBody = await unknown.json()
+  const deactivatedBody = await deactivated.json()
+  assert.deepEqual(deactivatedBody, unknownBody)
+  assert.equal(unknownBody.error, 'Account does not exist. Please contact the admin.')
+  const otpCountAfter = await pool.query('SELECT COUNT(*)::int AS n FROM login_otps WHERE user_id = $1', [employee.userId])
+  assert.equal(otpCountAfter.rows[0].n, otpCountBefore.rows[0].n)
+  const oldSession = await request('/requests', employee.token)
+  assert.equal(oldSession.status, 401)
+})
+
+test('registration accepts and stores colonless and colon-separated MAC addresses as uppercase hex', { skip: !integrationReady }, async () => {
+  const owner = await createEmployee()
+  const inputs = ['aabbccddeeff', '11:22:33:44:55:66']
+  const expected = ['AABBCCDDEEFF', '112233445566']
+  for (let index = 0; index < inputs.length; index += 1) {
+    const response = await request('/requests', owner.token, {
+      method: 'POST',
+      body: formData({ macAddress: inputs[index] }),
+    })
+    assert.equal(response.status, 201)
+    const { request: created } = await response.json()
+    const stored = await pool.query('SELECT mac_address FROM laptop_requests WHERE request_id=$1', [created.request_id])
+    assert.equal(stored.rows[0].mac_address, expected[index])
+    assert.match(stored.rows[0].mac_address, /^[0-9A-F]{12}$/)
+  }
+})
+
+test('employee registration validates inputs, encrypts typed license keys, stores a private invoice, and lists only owned requests', { skip: !integrationReady }, async () => {
   const owner = await createEmployee()
   const other = await createEmployee()
   const secretKey = `SYNTHETIC-LICENSE-${randomUUID()}`
   const response = await request('/requests', owner.token, {
     method: 'POST',
-    body: formData({ licenseKey: secretKey }),
+    body: formData({ windowsKey: secretKey, officeKey: `OFFICE-${randomUUID()}` }),
   })
   assert.equal(response.status, 201)
   const created = await response.json()
@@ -97,15 +141,21 @@ test('employee registration validates inputs, encrypts license keys, stores a pr
 
   const stored = await pool.query(
     `SELECT r.owner_employee_id, r.license_key_ciphertext, r.license_key_hmac,
+            r.windows_license_key_ciphertext, r.windows_license_key_hmac,
+            r.office_license_key_ciphertext, r.office_license_key_hmac,
             i.storage_key, i.sha256, i.size_bytes
      FROM laptop_requests r JOIN request_invoices i USING (request_id)
      WHERE r.request_id = $1`,
     [created.request.request_id],
   )
   assert.equal(stored.rows[0].owner_employee_id, owner.employeeId)
-  assert.ok(stored.rows[0].license_key_ciphertext)
-  assert.ok(stored.rows[0].license_key_hmac)
-  assert.notEqual(stored.rows[0].license_key_ciphertext.toString(), secretKey)
+  assert.equal(stored.rows[0].license_key_ciphertext, null, 'new submissions do not write legacy key columns')
+  assert.equal(stored.rows[0].license_key_hmac, null)
+  assert.ok(stored.rows[0].windows_license_key_ciphertext)
+  assert.ok(stored.rows[0].windows_license_key_hmac)
+  assert.ok(stored.rows[0].office_license_key_ciphertext)
+  assert.ok(stored.rows[0].office_license_key_hmac)
+  assert.notEqual(stored.rows[0].windows_license_key_ciphertext.toString(), secretKey)
   assert.match(stored.rows[0].storage_key, /^[0-9a-f-]{36}\.pdf$/i)
   assert.equal(stored.rows[0].sha256.length, 32)
   const privateFile = await readFile(path.join(invoiceStorage, stored.rows[0].storage_key))
@@ -123,12 +173,25 @@ test('employee registration validates inputs, encrypts license keys, stores a pr
   assert.deepEqual((await otherListResponse.json()).requests, [])
 })
 
+test('Windows keys are rejected for macOS submissions', { skip: !integrationReady }, async () => {
+  const owner = await createEmployee()
+  const response = await request('/requests', owner.token, {
+    method: 'POST', body: formData({ operatingSystem: 'macOS', windowsKey: 'SYNTHETIC-WINDOWS-KEY' }),
+  })
+  assert.equal(response.status, 400)
+  assert.match((await response.json()).error, /Windows key cannot be used with macOS/)
+})
+
 test('registration rejects invalid laptop data, invalid invoice content, and duplicate serial or MAC values', { skip: !integrationReady }, async () => {
   const owner = await createEmployee()
   const invalidMac = await request('/requests', owner.token, {
     method: 'POST', body: formData({ macAddress: 'bad-mac' }),
   })
   assert.equal(invalidMac.status, 400)
+  const invalidSeparator = await request('/requests', owner.token, {
+    method: 'POST', body: formData({ macAddress: 'AA-BB-CC-DD-EE-FF' }),
+  })
+  assert.equal(invalidSeparator.status, 400)
 
   const invalidInvoice = await request('/requests', owner.token, {
     method: 'POST', body: formData({}, Buffer.from('not a real PDF')),
@@ -151,7 +214,7 @@ test('registration rejects invalid laptop data, invalid invoice content, and dup
   })
   assert.equal(duplicateSerial.status, 409)
   const duplicateMac = await request('/requests', owner.token, {
-    method: 'POST', body: formData({ macAddress: mac.toLowerCase() }),
+    method: 'POST', body: formData({ macAddress: mac.replaceAll(':', '').toLowerCase() }),
   })
   assert.equal(duplicateMac.status, 409)
 })
