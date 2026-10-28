@@ -123,7 +123,7 @@ async function initializeDatabases() {
 }
 
 async function runIntegrationTests() {
-  const result = spawnSync(process.execPath, ['--test', '--test-concurrency=1', 'test/bootstrapAdmin.integration.test.js', 'test/postgres.integration.test.js', 'test/taskA.api.integration.test.js', 'test/workflow.integration.test.js', 'test/taskC.api.integration.test.js', 'test/invoiceReplacement.integration.test.js'], {
+  const result = spawnSync(process.execPath, ['--test', '--test-concurrency=1', 'test/bootstrapAdmin.integration.test.js', 'test/postgres.integration.test.js', 'test/taskA.api.integration.test.js', 'test/workflow.integration.test.js', 'test/taskC.api.integration.test.js', 'test/invoiceReplacement.integration.test.js', 'test/zz_audit.api.integration.test.js'], {
     cwd: serverDirectory,
     env: {
       ...process.env,

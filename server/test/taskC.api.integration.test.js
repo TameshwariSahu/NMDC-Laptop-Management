@@ -275,9 +275,11 @@ test('admin creates profiles for every role and can create or edit legacy profil
   assert.equal(listedAdminBody.accounts[0].employeeCategory, 'JO')
   const profileRows = await pool.query('SELECT COUNT(*)::int AS count FROM employees WHERE user_id=$1', [missingProfileUser.rows[0].user_id])
   assert.equal(profileRows.rows[0].count, 1)
-  const profileAudits = await pool.query(`SELECT action,details->'changedFields' AS changed_fields FROM audit_log WHERE entity_id=$1 ORDER BY audit_log_id`, [missingProfileUser.rows[0].user_id])
+  const profileAudits = await pool.query(`SELECT action,details FROM audit_log WHERE entity_id=$1 ORDER BY audit_log_id`, [missingProfileUser.rows[0].user_id])
   assert.deepEqual(profileAudits.rows.map((row) => row.action), ['account_profile_created', 'account_profile_updated'])
-  assert.deepEqual(profileAudits.rows[0].changed_fields, ['employeeName','designation','employeeCategory','department'])
+  assert.deepEqual(profileAudits.rows[0].details.changedFields, ['employeeName','designation','employeeCategory','department'])
+  assert.deepEqual(profileAudits.rows[0].details.changes.employeeName, { old: null, new: profileValues.employeeName })
+  assert.deepEqual(profileAudits.rows[1].details.changes.employeeName, { old: profileValues.employeeName, new: 'Updated Synthetic Admin' })
   await pool.query('UPDATE users SET is_active=false WHERE user_id=$1', [missingProfileUser.rows[0].user_id])
   const missingFields = await api('/admin/accounts', first, 'POST', {
     sapId: `MF${randomUUID().replaceAll('-', '').slice(0, 6).toUpperCase()}`, email: `${randomUUID()}@example.invalid`, role: 'admin',

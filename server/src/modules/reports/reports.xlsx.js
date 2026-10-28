@@ -151,6 +151,51 @@ function zip(entries) {
   return Buffer.concat([...localParts, centralDirectory, end])
 }
 
+function auditWorksheetXml(rows) {
+  const cols = [
+    ['When', 'occurredAt', 23], ['Who', 'who', 30], ['Action', 'actionLabel', 28],
+    ['Affected Record', 'affectedRecord', 48], ['What Changed', 'whatChanged', 58],
+  ]
+  const stringifyChanges = (row) => {
+    const parts = []
+    for (const [field, change] of Object.entries(row.changes ?? {})) {
+      if (change === 'changed') parts.push(`${field}: changed`)
+      else if (change && typeof change === 'object' && Object.hasOwn(change, 'old')) parts.push(`${field}: ${change.old ?? 'empty'} → ${change.new ?? 'empty'}`)
+    }
+    for (const field of row.changedFields ?? []) if (!Object.hasOwn(row.changes ?? {}, field)) parts.push(`${field}: recorded (legacy)`)
+    if (row.oldStatus || row.newStatus) parts.push(`Status: ${row.oldStatus ?? 'new'} → ${row.newStatus ?? ''}`)
+    return parts.join('; ') || 'No field values recorded'
+  }
+  const cells = (row, rowNo, header) => cols.map(([, field], index) => {
+    let value = header ? cols[index][0] : field === 'occurredAt'
+      ? (row.occurredAt ? new Date(row.occurredAt).toISOString().replace('T', ' ').replace('Z', ' UTC') : '')
+      : field === 'whatChanged' ? stringifyChanges(row) : row[field]
+    return textCell(cellReference(index, rowNo), value, header ? 1 : 0)
+  }).join('')
+  const content = [
+    `<row r="1" ht="28" customHeight="1">${cells({}, 1, true)}</row>`,
+    ...rows.map((row, i) => `<row r="${i + 2}">${cells(row, i + 2, false)}</row>`),
+  ].join('')
+  const widths = cols.map(([, , width], index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`).join('')
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${widths}</cols><sheetData>${content}</sheetData></worksheet>`
+}
+
+function workbookWithSheet(name, sheet) {
+  return zip({
+    '[Content_Types].xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
+    '_rels/.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+    'xl/workbook.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${name}" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+    'xl/_rels/workbook.xml.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+    'xl/styles.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`,
+    'xl/worksheets/sheet1.xml': sheet,
+  })
+}
+
+export function createAuditWorkbook(rows) {
+  if (!Array.isArray(rows)) throw new TypeError('Audit rows must be an array')
+  return workbookWithSheet('Audit', auditWorksheetXml(rows))
+}
+
 export function createReportWorkbook(rows) {
   if (!Array.isArray(rows)) throw new TypeError('Report rows must be an array')
   return zip({

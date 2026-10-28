@@ -105,6 +105,8 @@ test('registered Engineer cannot approve after correction; a different Engineer 
     method: 'POST', body: { expectedVersion: 1, modelNumber: 'Corrected after return' },
   })
   assert.equal(correction.status, 200)
+  const correctionAudit = await pool.query(`SELECT details FROM audit_log WHERE entity_id=$1 AND action='correction_resubmitted'`, [request.request_id])
+  assert.deepEqual(correctionAudit.rows[0].details.changes.modelNumber, { old: 'Workflow Synthetic', new: 'Corrected after return' })
   const selfApproval = await api(`/engineer/requests/${request.request_id}/decision`, registeringEngineer.token, {
     method: 'POST', body: { action: 'approve', expectedVersion: 2 },
   })
@@ -319,6 +321,7 @@ test('employee correction checks ownership and version, re-encrypts changed keys
   })
   assert.equal(stale.status, 409)
 
+  const beforeCorrection = await pool.query('SELECT serial_number,model_number FROM laptop_requests WHERE request_id=$1', [employee.request_id])
   const corrected = await api(`/employee/requests/${employee.request_id}/corrections`, owner.token, {
     method: 'POST', body: {
       expectedVersion: 1, serialNumber: 'CORRECTED-SERIAL', modelNumber: 'Corrected synthetic model',
@@ -347,6 +350,11 @@ test('employee correction checks ownership and version, re-encrypts changed keys
   assert.equal(stored.rows[0].action, 'EMPLOYEE_RESUBMITTED')
   assert.equal(stored.rows[0].remarks, 'Updated requested details')
   assert.equal(stored.rows[0].audit_count, 1)
+  const employeeCorrectionAudit = await pool.query(`SELECT details FROM audit_log WHERE entity_id=$1 AND action='employee_resubmitted'`, [employee.request_id])
+  assert.deepEqual(employeeCorrectionAudit.rows[0].details.changes.serialNumber, { old: beforeCorrection.rows[0].serial_number, new: 'CORRECTED-SERIAL' })
+  assert.deepEqual(employeeCorrectionAudit.rows[0].details.changes.modelNumber, { old: beforeCorrection.rows[0].model_number, new: 'Corrected synthetic model' })
+  assert.equal(employeeCorrectionAudit.rows[0].details.changes.windowsKey, 'changed')
+  assert.equal(JSON.stringify(employeeCorrectionAudit.rows[0].details).includes('ABCDE-12345-FGHIJ-67890-KLMNO'), false)
 })
 
 test('engineer edits permitted fields only in PENDING_ENGINEER and increments version without changing status', { skip: !integrationReady }, async () => {
@@ -375,6 +383,9 @@ test('engineer edits permitted fields only in PENDING_ENGINEER and increments ve
   )
   assert.equal(editAudit.rowCount, 1)
   assert.deepEqual(editAudit.rows[0].details.changedFields.sort(), ['modelNumber', 'msOfficeAccountEmail', 'officeKey'])
+  assert.deepEqual(editAudit.rows[0].details.changes.modelNumber, { old: 'Workflow Synthetic', new: 'Engineer edited synthetic model' })
+  assert.deepEqual(editAudit.rows[0].details.changes.msOfficeAccountEmail, { old: null, new: 'office.owner@example.invalid' })
+  assert.equal(editAudit.rows[0].details.changes.officeKey, 'changed')
   assert.equal(editAudit.rows[0].details.remarks, 'Corrected the synthetic model details')
   assert.equal(JSON.stringify(editAudit.rows[0].details).includes(syntheticKey), false)
 

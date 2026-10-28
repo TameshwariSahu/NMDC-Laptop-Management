@@ -82,3 +82,25 @@ column widths set for readability.
 Laptop request rows include `createdBySapId` and `updatedBySapId` in database
 exports where those trigger-maintained fields are available. The spreadsheet
 includes Created By and Updated By SAP ID columns.
+
+## Admin audit
+
+`GET /admin/audit` is Admin-only. Role authorization is checked against the
+current database account on every request. Optional filters are `sapId`,
+`action`, `from` and `to` (`YYYY-MM-DD`); pagination uses `limit` (1–100) and
+`offset`. The response contains the timestamp, actor (`Name (SAP ID)`, `System`,
+SAP ID alone, or `Unknown (legacy)`), readable action label, affected record,
+safe change summary, and pagination metadata. Old audit rows without field
+values show changed field names when available. Secret values, tokens, OTPs,
+license key values, ciphertext and HMAC fingerprints are excluded.
+
+`GET /admin/audit/export.xlsx` applies the same filters and exports every
+matching audit entry. Export activity is recorded as `audit_exported`, with
+the filters only. The Audit interface is read-only; there are no update or
+delete endpoints.
+
+New laptop edits record old and new values for ordinary edited fields in the
+same transaction as the update and audit row. License key changes record only
+`changed`. This covers Engineer edits, Employee corrections, Engineer
+corrections, register-on-behalf submissions, account profile edits, and
+account role/activation/profile changes.

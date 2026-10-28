@@ -205,6 +205,23 @@ export const laptopApi = {
     return apiFetch(`/admin/accounts?${params}`)
   },
 
+  async listAudit({ limit = 25, offset = 0, sapId = '', action = '', from = '', to = '' } = {}) {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+    for (const [key, value] of Object.entries({ sapId, action, from, to })) if (value) params.set(key, value)
+    return apiFetch(`/admin/audit?${params}`)
+  },
+
+  async downloadAuditExcel({ sapId = '', action = '', from = '', to = '' } = {}) {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries({ sapId, action, from, to })) if (value) params.set(key, value)
+    const blob = await apiBlob(`/admin/audit/export.xlsx?${params}`)
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url; anchor.download = `audit-${new Date().toISOString().slice(0, 10)}.xlsx`
+    document.body.append(anchor); anchor.click(); anchor.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
+  },
+
   async createAccount(account) {
     return (await apiFetch('/admin/accounts', { method: 'POST', body: account })).account
   },

@@ -42,7 +42,15 @@ export async function createAccount(req, res, next) {
     const user = result.rows[0]
     await client.query(`INSERT INTO employees (user_id,sap_id,employee_name,email,designation,employee_category,department)
       VALUES ($1,$2,$3,$4,$5,$6,$7)`, [user.user_id, user.sap_id, profile[0], user.email, profile[1], profile[2], profile[3]])
-    await audit(client, req.currentUser, 'account_created', user.user_id, { sapId: user.sap_id, role, changedFields: ['sapId','email','role','employeeProfile'] })
+    await audit(client, req.currentUser, 'account_created', user.user_id, {
+      sapId: user.sap_id, role, changedFields: ['sapId','email','role','employeeProfile'],
+      changes: {
+        sapId: { old: null, new: user.sap_id }, email: { old: null, new: user.email },
+        role: { old: null, new: role }, employeeName: { old: null, new: profile[0] },
+        designation: { old: null, new: profile[1] }, employeeCategory: { old: null, new: profile[2] },
+        department: { old: null, new: profile[3] },
+      },
+    })
     await client.query('COMMIT')
     return res.status(201).json({ account: {
       userId: user.user_id, sapId: user.sap_id, email: user.email, role, isActive: user.is_active,
@@ -61,7 +69,9 @@ export async function updateAccountProfile(req, res, next) {
     await client.query('BEGIN')
     const user = await client.query('SELECT user_id,sap_id,email,role FROM users WHERE user_id=$1 FOR UPDATE', [id])
     if (!user.rowCount) throw err(404, 'Account not found')
-    const current = await client.query('SELECT employee_id FROM employees WHERE user_id=$1', [id])
+    const current = await client.query(`SELECT employee_id,employee_name,designation,employee_category,department
+      FROM employees WHERE user_id=$1`, [id])
+    const before = current.rows[0]
     if (current.rowCount) {
       await client.query(`UPDATE employees SET employee_name=$2,designation=$3,employee_category=$4,department=$5
         WHERE user_id=$1`, [id, ...profile])
@@ -72,6 +82,9 @@ export async function updateAccountProfile(req, res, next) {
     await audit(client, req.currentUser, current.rowCount ? 'account_profile_updated' : 'account_profile_created', id, {
       sapId: user.rows[0].sap_id, role: user.rows[0].role,
       changedFields: ['employeeName','designation','employeeCategory','department'],
+      changes: Object.fromEntries(['employeeName','designation','employeeCategory','department'].map((field, index) => [
+        field, { old: before ? before[{ employeeName: 'employee_name', designation: 'designation', employeeCategory: 'employee_category', department: 'department' }[field]] : null, new: profile[index] },
+      ])),
     })
     await client.query('COMMIT')
     return res.json({ account: {
@@ -90,7 +103,7 @@ export async function updateAccount(req, res, next) {
     if (body.isActive !== undefined && typeof body.isActive !== 'boolean') throw err(400, 'isActive must be boolean')
     await client.query('BEGIN')
     await client.query('SELECT pg_advisory_xact_lock(731943, 1)')
-    const result = await client.query('SELECT user_id,sap_id,role,is_active FROM users WHERE user_id=$1 FOR UPDATE', [id])
+    const result = await client.query('SELECT user_id,sap_id,email,role,is_active FROM users WHERE user_id=$1 FOR UPDATE', [id])
     const target = result.rows[0]
     if (!target) throw err(404, 'Account not found')
     const newRole = body.role ?? target.role, newActive = body.isActive ?? target.is_active
@@ -99,17 +112,21 @@ export async function updateAccount(req, res, next) {
       const n = await client.query("SELECT COUNT(*)::int AS n FROM users WHERE role='admin' AND is_active=TRUE")
       if (n.rows[0].n <= 1) throw err(409, 'The last active Admin cannot be removed')
     }
-    const changed = []
+    const changed = [], changes = {}
+    if (body.role !== undefined && newRole !== target.role) changes.role = { old: target.role, new: newRole }
+    if (body.isActive !== undefined && newActive !== target.is_active) changes.isActive = { old: target.is_active, new: newActive }
     if (newRole !== target.role) changed.push('role')
     if (newActive !== target.is_active) changed.push('isActive')
     await client.query('UPDATE users SET role=$2,is_active=$3,updated_at=NOW() WHERE user_id=$1', [id,newRole,newActive])
     if (newRole === 'employee') {
-      const existing = await client.query('SELECT employee_id FROM employees WHERE user_id=$1', [id])
+      const existing = await client.query(`SELECT employee_id,employee_name,designation,employee_category,department
+        FROM employees WHERE user_id=$1`, [id])
       if (!existing.rowCount) {
         const profile = profileFields(body)
         await client.query(`INSERT INTO employees (user_id,sap_id,employee_name,email,designation,employee_category,department)
           SELECT user_id,sap_id,$2,email,$3,$4,$5 FROM users WHERE user_id=$1`, [id,profile[0],profile[1],profile[2],profile[3]])
         changed.push('employeeProfile')
+        for (const [field, index] of [['employeeName',0],['designation',1],['employeeCategory',2],['department',3]]) changes[field] = { old: null, new: profile[index] }
       } else {
         const fields = ['employeeName','designation','employeeCategory','department'].filter((k) => body[k] !== undefined)
         if (fields.length) {
@@ -120,10 +137,18 @@ export async function updateAccount(req, res, next) {
             department: body.department ?? (await client.query('SELECT department FROM employees WHERE user_id=$1',[id])).rows[0].department,
           })
           await client.query('UPDATE employees SET employee_name=$2,designation=$3,employee_category=$4,department=$5 WHERE user_id=$1',[id,...profile]); changed.push('employeeProfile')
+          const keys = ['employeeName','designation','employeeCategory','department']
+          const columns = ['employee_name','designation','employee_category','department']
+          keys.forEach((key, index) => {
+            const old = existing.rows[0][columns[index]], value = profile[index]
+            if (old !== value) changes[key] = { old, new: value }
+          })
         }
       }
     }
-    if (changed.length) await audit(client, req.currentUser, 'account_updated', id, { sapId: target.sap_id, changedFields: changed, role: newRole, isActive: newActive })
+    if (changed.length) await audit(client, req.currentUser, 'account_updated', id, {
+      sapId: target.sap_id, changedFields: changed, changes, role: newRole, isActive: newActive,
+    })
     await client.query('COMMIT')
     return res.json({ account: { userId: id, sapId: target.sap_id, role: newRole, isActive: newActive } })
   } catch (error) { await client.query('ROLLBACK').catch(() => {}); return next(error) }

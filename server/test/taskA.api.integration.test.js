@@ -188,8 +188,11 @@ test('Engineer can register on behalf with owner, creator audit, employee lookup
   assert.equal(saved.rows[0].owner_employee_id, employee.employeeId)
   assert.equal(saved.rows[0].registered_by_user_id, engineer.userId)
   assert.equal(saved.rows[0].created_by_sap_id, engineer.sapId)
-  const audit = await pool.query(`SELECT action FROM audit_log WHERE entity_id=$1`, [created.request_id])
-  assert.ok(audit.rows.some((row) => row.action === 'registered_on_behalf'))
+  const audit = await pool.query(`SELECT action,details FROM audit_log WHERE entity_id=$1`, [created.request_id])
+  const onBehalfAudit = audit.rows.find((row) => row.action === 'registered_on_behalf')
+  assert.ok(onBehalfAudit)
+  assert.deepEqual(onBehalfAudit.details.changes.serialNumber, { old: null, new: `ONBEHALF-${tag.slice(0, 8)}-01` })
+  assert.deepEqual(onBehalfAudit.details.changes.modelNumber, { old: null, new: 'Synthetic Model 100' })
   const selfApproval = await fetch(`${apiRoot}/engineer/requests/${created.request_id}/decision`, {
     method: 'POST', headers: { authorization: `Bearer ${engineer.token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ action: 'approve', expectedVersion: 1 }),

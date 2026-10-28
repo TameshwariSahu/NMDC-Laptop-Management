@@ -7,6 +7,7 @@ import ReviewQueuePage from './pages/ReviewQueuePage.jsx'
 import EngineerRegisterPage from './pages/EngineerRegisterPage.jsx'
 import ReportsPage from './pages/ReportsPage.jsx'
 import { AccountsPage, ClearancePage } from './pages/AdminPages.jsx'
+import AuditPage from './pages/AuditPage.jsx'
 
 function homeForRole(role) {
   return role === 'employee' ? '/employee' : role === 'engineer' ? '/engineer' : '/admin'
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="/admin" element={<RoleGate roles={['admin']}><ReviewQueuePage mode="admin" /></RoleGate>} />
         <Route path="/admin/accounts" element={<RoleGate roles={['admin']}><AccountsPage /></RoleGate>} />
         <Route path="/admin/clearance" element={<RoleGate roles={['admin']}><ClearancePage /></RoleGate>} />
+        <Route path="/admin/audit" element={<RoleGate roles={['admin']}><AuditPage /></RoleGate>} />
         <Route path="/reports" element={<RoleGate roles={['engineer', 'admin']}><ReportsPage /></RoleGate>} />
       </Route>
     </Route>

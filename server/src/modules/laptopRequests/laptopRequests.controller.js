@@ -162,7 +162,19 @@ async function createRequest(req, res, next, onBehalf = false) {
       `INSERT INTO audit_log (actor_user_id, actor_sap_id, action, entity_type, entity_id, details)
        VALUES ($1, $2, $3, 'laptop_request', $4, $5::jsonb)`,
       [req.currentUser.userId, req.currentUser.sapId, onBehalf ? 'registered_on_behalf' : 'laptop_request_submitted',
-        request.request_id, JSON.stringify({ status: request.status })],
+        request.request_id, JSON.stringify({
+          status: request.status,
+          changes: {
+            serialNumber: { old: null, new: laptop.serialNumber },
+            purchaseDate: { old: null, new: laptop.purchaseDate },
+            modelNumber: { old: null, new: laptop.modelNumber },
+            macAddress: { old: null, new: laptop.macAddress },
+            operatingSystem: { old: null, new: laptop.operatingSystem },
+            msOfficeAccountEmail: { old: null, new: laptop.msOfficeAccountEmail ?? null },
+            ...(laptop.windowsKey ? { windowsKey: 'changed' } : {}),
+            ...(laptop.officeKey ? { officeKey: 'changed' } : {}),
+          },
+        })],
     )
     await storeInvoice(metadata, invoice.data)
     storedKey = storageKey

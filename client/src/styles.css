@@ -273,6 +273,12 @@ td strong { color: #46536a; font-weight: 600; }
 .account-search input { width: min(100%, 360px); }
 .table-message { padding: 18px; color: #8e99aa; font-size: 12px; }
 .report-filters { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; padding: 14px; }
+.audit-filters label { flex: 1 1 140px; }
+.audit-filters input { width: 100%; }
+.audit-table { min-width: 1050px; }
+.audit-table th { position: sticky; top: 0; z-index: 1; }
+.audit-table td { vertical-align: top; min-width: 125px; }
+.audit-table td:last-child { min-width: 280px; overflow-wrap: anywhere; }
 .report-filters label, .clearance-footer label { display: flex; flex-direction: column; gap: 5px; color: #69768a; font-size: 11px; }
 .report-filters input, .report-filters select { min-width: 130px; }
 .pagination-row { padding: 12px 17px; display: flex; justify-content: space-between; align-items: center; color: #929daf; font-size: 11px; border-top: 1px solid #edf0f4; }

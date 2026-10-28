@@ -91,6 +91,7 @@ function validatePatch(body, { allowRemarks = false } = {}) {
 async function lockRequest(client, requestId, req, expectedVersion) {
   const result = await client.query(
     `SELECT request_id, owner_employee_id, status, version, operating_system,
+       serial_number, purchase_date, model_number, mac_address,
        ms_office_account_email, registered_by_user_id,
        (windows_license_key_ciphertext IS NOT NULL) AS windows_key_present,
        (office_license_key_ciphertext IS NOT NULL) AS office_key_present
@@ -156,7 +157,7 @@ function buildUpdate(patch, requestId, expectedVersion, status) {
   }
 }
 
-async function insertWorkflowEvents(client, req, { requestId, oldStatus, newStatus, action, remarks, changedFields, version }) {
+async function insertWorkflowEvents(client, req, { requestId, oldStatus, newStatus, action, remarks, changedFields, changes, version }) {
   await client.query(
     `INSERT INTO approval_history
        (request_id, actor_user_id, actor_sap_id, action, remarks, old_status, new_status)
@@ -167,17 +168,39 @@ async function insertWorkflowEvents(client, req, { requestId, oldStatus, newStat
     `INSERT INTO audit_log (actor_user_id, actor_sap_id, action, entity_type, entity_id, details)
      VALUES ($1, $2, $3, 'laptop_request', $4, $5::jsonb)`,
     [req.currentUser.userId, req.currentUser.sapId, action.toLowerCase(), requestId,
-      JSON.stringify({ oldStatus, newStatus, version, changedFields })],
+      JSON.stringify({ oldStatus, newStatus, version, changedFields, changes })],
   )
 }
 
-async function addEditAudit(client, req, { requestId, status, remarks, changedFields, version }) {
+async function addEditAudit(client, req, { requestId, status, remarks, changedFields, changes, version }) {
   await client.query(
     `INSERT INTO audit_log (actor_user_id, actor_sap_id, action, entity_type, entity_id, details)
      VALUES ($1, $2, 'laptop_request_edited', 'laptop_request', $3, $4::jsonb)`,
     [req.currentUser.userId, req.currentUser.sapId, requestId,
-      JSON.stringify({ status, remarks, changedFields, version })],
+      JSON.stringify({ status, remarks, changedFields, changes, version })],
   )
+}
+
+function changesForPatch(request, patch) {
+  const changes = {}
+  const oldValues = {
+    serialNumber: request.serial_number,
+    purchaseDate: request.purchase_date,
+    modelNumber: request.model_number,
+    macAddress: request.mac_address,
+    operatingSystem: request.operating_system,
+    msOfficeAccountEmail: request.ms_office_account_email,
+  }
+  for (const [field, entry] of Object.entries(patch)) {
+    if (entry.column) {
+      const oldValue = oldValues[field] ?? null
+      if (oldValue !== entry.value) changes[field] = { old: oldValue, new: entry.value }
+    } else {
+      const presentField = field === 'windowsKey' ? 'windows_key_present' : 'office_key_present'
+      if (Boolean(request[presentField]) !== Boolean(entry.values[0]) || entry.values[0]) changes[field] = 'changed'
+    }
+  }
+  return changes
 }
 
 function changedFieldNames(patch) {
@@ -295,7 +318,8 @@ export async function editEngineerRequest(req, res, next) {
     const update = buildUpdate(patch, requestId, expectedVersion)
     const updated = await client.query(update.sql, update.values)
     await addEditAudit(client, req, {
-      requestId, status: request.status, remarks, changedFields: changedFieldNames(patch), version: updated.rows[0].version,
+      requestId, status: request.status, remarks, changedFields: changedFieldNames(patch),
+      changes: changesForPatch(request, patch), version: updated.rows[0].version,
     })
     await client.query('COMMIT')
     return res.json({ request: updated.rows[0] })
@@ -342,7 +366,7 @@ export async function submitCorrection(req, res, next) {
     const action = request.status === 'NEEDS_EMPLOYEE_CORRECTION' ? 'EMPLOYEE_RESUBMITTED' : 'CORRECTION_RESUBMITTED'
     await insertWorkflowEvents(client, req, {
       requestId, oldStatus: request.status, newStatus: 'PENDING_ENGINEER', action, remarks,
-      changedFields: changedFieldNames(patch), version: updated.rows[0].version,
+      changedFields: changedFieldNames(patch), changes: changesForPatch(request, patch), version: updated.rows[0].version,
     })
     await client.query('COMMIT')
     return res.json({ request: updated.rows[0] })
