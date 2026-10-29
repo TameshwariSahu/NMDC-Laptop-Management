@@ -87,8 +87,11 @@ includes Created By and Updated By SAP ID columns.
 
 `GET /admin/audit` is Admin-only. Role authorization is checked against the
 current database account on every request. Optional filters are `sapId`,
-`action`, `from` and `to` (`YYYY-MM-DD`); pagination uses `limit` (1–100) and
-`offset`. The response contains the timestamp, actor (`Name (SAP ID)`, `System`,
+`sapIdScope` (`changedBy` or `affectedEmployee`), `action` (case-insensitive
+substring search over the readable label or stored action), `from` and `to`
+(`YYYY-MM-DD`); pagination uses `limit` (1–100) and `offset`. The client sends
+its IANA `timeZone`; date bounds cover the whole local calendar day, including
+the `to` date. The response contains the timestamp, actor (`Name (SAP ID)`, `System`,
 SAP ID alone, or `Unknown (legacy)`), readable action label, affected record,
 safe change summary, and pagination metadata. Old audit rows without field
 values show changed field names when available. Secret values, tokens, OTPs,

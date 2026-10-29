@@ -32,6 +32,15 @@ async function actor(role, name) {
 async function api(path, user) {
   return fetch(`${baseUrl}${path}`, { headers: { authorization: `Bearer ${user.token}` } })
 }
+function queryLikeClient(filters = {}) {
+  const params = new URLSearchParams({ limit: String(filters.limit ?? 25), offset: String(filters.offset ?? 0), timeZone: filters.timeZone ?? 'Asia/Calcutta' })
+  if (filters.sapId) { params.set('sapId', filters.sapId); params.set('sapIdScope', filters.sapIdScope ?? 'changedBy') }
+  for (const key of ['action','from','to']) if (filters[key]) params.set(key, filters[key])
+  return `/admin/audit?${params}`
+}
+function localDateInZone(date, timeZone) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(date)
+}
 async function seedAudit(admin, owner) {
   const request = await pool.query(`INSERT INTO laptop_requests(owner_employee_id,serial_number,purchase_date,model_number,mac_address,operating_system,status)
     SELECT employee_id,$2,CURRENT_DATE,$3,$4,'Windows','APPROVED' FROM employees WHERE user_id=$1 RETURNING request_id`,
@@ -67,22 +76,46 @@ test('Audit filters, pagination, labels and response exclude secret and key mate
   const admin = await actor('admin','Synthetic Audit Admin')
   const employee = await actor('employee','Synthetic Audit Owner')
   const seeded = await seedAudit(admin,employee)
-  const date = seeded.when.slice(0,10)
-  const pageOne = await api(`/admin/audit?sapId=${admin.sapId}&action=laptop_request_edited&from=${date}&to=${date}&limit=1&offset=0`,admin)
+  const date = localDateInZone(new Date(seeded.when), 'Asia/Calcutta')
+  const pageOne = await api(queryLikeClient({ sapId: admin.sapId, action: 'laptop_request_edited', from: date, to: date, limit: 1, offset: 0 }),admin)
   assert.equal(pageOne.status,200)
   const one = await pageOne.json()
   assert.equal(one.pagination.total,1)
   assert.equal(one.entries.length,1)
   assert.equal(one.entries[0].who,`${admin.name} (${admin.sapId})`)
   assert.equal(one.entries[0].actionLabel,'Laptop request edited')
+  assert.match(one.entries[0].affectedRecord,/Synthetic Audit Owner \(.*\)/)
   assert.match(one.entries[0].affectedRecord,/AUD-/)
-  assert.match(one.entries[0].affectedRecord,/Synthetic Audit Owner/)
   assert.match(one.entries[0].affectedRecord,/Synthetic Audit Laptop/)
   assert.deepEqual(one.entries[0].changes.windowsKey,'changed')
   const responseText = JSON.stringify(one)
   for (const secret of ['SENSITIVE-PLAINTEXT','SENSITIVE-CIPHERTEXT','SENSITIVE-HMAC','123456','secret-token','licenseKey','ciphertext','fingerprint']) {
     assert.equal(responseText.includes(secret),false,`response leaked ${secret}`)
   }
+
+  const actionAlone = await api(queryLikeClient({ action: 'EdIt' }), admin)
+  assert.ok((await actionAlone.json()).entries.some((entry) => entry.action === 'laptop_request_edited'))
+  const lowerCaseAction = await api(queryLikeClient({ action: 'eDiT' }), admin)
+  assert.ok((await lowerCaseAction.json()).entries.some((entry) => entry.action === 'laptop_request_edited'))
+  const readableLabelSearch = await api(queryLikeClient({ action: 'Laptop request edit' }), admin)
+  assert.ok((await readableLabelSearch.json()).entries.some((entry) => entry.action === 'laptop_request_edited'))
+  const noMatch = await api(queryLikeClient({ action: 'nothing-matches-this' }), admin)
+  assert.equal((await noMatch.json()).pagination.total, 0)
+
+  const sapAlone = await api(queryLikeClient({ sapId: admin.sapId.toLowerCase() }), admin)
+  const sapResults = await sapAlone.json()
+  assert.equal(sapResults.pagination.total, 2)
+  const accountEvent = sapResults.entries.find((entry) => entry.action === 'account_updated')
+  assert.ok(accountEvent.affectedRecord.includes(`Synthetic Audit Owner (${employee.sapId})`))
+  const dateAlone = await api(queryLikeClient({ from: date, to: date }), admin)
+  assert.ok((await dateAlone.json()).entries.some((entry) => entry.action === 'laptop_request_edited'))
+  const affectedPerson = await api(queryLikeClient({ sapId: employee.sapId.toLowerCase(), sapIdScope: 'affectedEmployee', action: 'EDIT', from: date, to: date }), admin)
+  const affectedResult = await affectedPerson.json()
+  assert.equal(affectedResult.pagination.total, 1)
+  assert.equal(affectedResult.entries[0].action, 'laptop_request_edited')
+  assert.ok(affectedResult.entries[0].affectedRecord.includes(`Synthetic Audit Owner (${employee.sapId})`))
+  const wrongScope = await api(queryLikeClient({ sapId: employee.sapId, sapIdScope: 'changedBy', action: 'EDIT' }), admin)
+  assert.equal((await wrongScope.json()).pagination.total, 0)
 
   const pair = await pool.query(`INSERT INTO audit_log(actor_user_id,actor_sap_id,action,entity_type,entity_id,details)
     VALUES($1,$2,'account_updated','user',$3,'{}'),($1,$2,'account_updated','user',$3,'{}')`, [admin.userId,admin.sapId,employee.userId])
@@ -94,6 +127,26 @@ test('Audit filters, pagination, labels and response exclude secret and key mate
   const secondResponse = await api(`/admin/audit?sapId=${admin.sapId}&action=account_updated&limit=1&offset=1`,admin)
   const second = await secondResponse.json()
   assert.equal(second.entries.length,1)
+
+  await pool.query(`INSERT INTO audit_log(actor_user_id,actor_sap_id,action,entity_type,details) VALUES
+    ($1,$2,'auditXliteralYtest','test','{}'),($1,$2,'audit_percent_test','test','{}')`, [admin.userId,admin.sapId])
+  const escapedUnderscore = await api(queryLikeClient({ sapId: admin.sapId, action: 'audit_literal_test' }),admin)
+  assert.equal((await escapedUnderscore.json()).pagination.total,0)
+  const escapedPercent = await api(queryLikeClient({ sapId: admin.sapId, action: 'audit%test' }),admin)
+  assert.equal((await escapedPercent.json()).pagination.total,0)
+})
+
+test('Audit To date includes the full local day and excludes adjacent days', { skip: !ready }, async () => {
+  const admin = await actor('admin','Synthetic Boundary Admin')
+  const timeZone = 'Asia/Calcutta', date = localDateInZone(new Date(),'Asia/Calcutta')
+  await pool.query(`INSERT INTO audit_log(actor_user_id,actor_sap_id,action,entity_type,details,occurred_at) VALUES
+    ($1,$2,'date_boundary_test','test','{}',(($3::date - 1 + TIME '23:59:59') AT TIME ZONE $4)),
+    ($1,$2,'date_boundary_test','test','{}',(($3::date + TIME '23:59:59') AT TIME ZONE $4)),
+    ($1,$2,'date_boundary_test','test','{}',(($3::date + 1 + TIME '00:00:00') AT TIME ZONE $4))`, [admin.userId,admin.sapId,date,timeZone])
+  const response = await api(queryLikeClient({ sapId: admin.sapId, action: 'date_boundary_test', from: date, to: date, timeZone }),admin)
+  assert.equal(response.status,200)
+  const result = await response.json()
+  assert.equal(result.pagination.total,1)
 })
 
 test('Audit Excel export uses the same filtered safe entries', { skip: !ready }, async () => {

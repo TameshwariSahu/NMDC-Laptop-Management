@@ -2,6 +2,7 @@ import { apiBlob, apiFetch } from '../api.js'
 import { normalizeMacAddress } from '../utils/macAddress.js'
 import { normalizeLicenseKey } from '../utils/licenseKey.js'
 import { normalizeEmail } from '../utils/email.js'
+import { auditTimeZone } from '../utils/auditFilters.js'
 
 function normalizeRequest(row) {
   const history = row.history ?? []
@@ -205,15 +206,17 @@ export const laptopApi = {
     return apiFetch(`/admin/accounts?${params}`)
   },
 
-  async listAudit({ limit = 25, offset = 0, sapId = '', action = '', from = '', to = '' } = {}) {
-    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
-    for (const [key, value] of Object.entries({ sapId, action, from, to })) if (value) params.set(key, value)
+  async listAudit({ limit = 25, offset = 0, sapId = '', sapIdScope = 'changedBy', action = '', from = '', to = '' } = {}) {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset), timeZone: auditTimeZone() })
+    if (sapId) { params.set('sapId', sapId); params.set('sapIdScope', sapIdScope) }
+    for (const [key, value] of Object.entries({ action, from, to })) if (value) params.set(key, value)
     return apiFetch(`/admin/audit?${params}`)
   },
 
-  async downloadAuditExcel({ sapId = '', action = '', from = '', to = '' } = {}) {
-    const params = new URLSearchParams()
-    for (const [key, value] of Object.entries({ sapId, action, from, to })) if (value) params.set(key, value)
+  async downloadAuditExcel({ sapId = '', sapIdScope = 'changedBy', action = '', from = '', to = '' } = {}) {
+    const params = new URLSearchParams({ timeZone: auditTimeZone() })
+    if (sapId) { params.set('sapId', sapId); params.set('sapIdScope', sapIdScope) }
+    for (const [key, value] of Object.entries({ action, from, to })) if (value) params.set(key, value)
     const blob = await apiBlob(`/admin/audit/export.xlsx?${params}`)
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')

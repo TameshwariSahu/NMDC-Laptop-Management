@@ -29,23 +29,69 @@ function dateFilter(value, name) {
   return value
 }
 function readFilters(query) {
-  const filters = { sapId: null, action: null, from: dateFilter(query.from, 'from'), to: dateFilter(query.to, 'to') }
+  const filters = {
+    sapId: null, sapIdScope: query.sapIdScope === 'affectedEmployee' ? 'affectedEmployee' : 'changedBy',
+    action: null, from: dateFilter(query.from, 'from'), to: dateFilter(query.to, 'to'),
+    timeZone: String(query.timeZone ?? 'UTC'),
+  }
+  if (query.sapIdScope && !['changedBy', 'affectedEmployee'].includes(query.sapIdScope)) throw bad('sapIdScope must be changedBy or affectedEmployee')
+  if (filters.timeZone.length > 100) throw bad('Invalid time zone')
+  try { new Intl.DateTimeFormat('en-US', { timeZone: filters.timeZone }) }
+  catch { throw bad('Invalid time zone') }
   const where = [], values = []
-  const add = (sql, value) => { values.push(value); where.push(sql.replace('?', `$${values.length}`)) }
+  const add = (sql, ...params) => {
+    let indexed = sql
+    for (const value of params) {
+      values.push(value)
+      indexed = indexed.replace('?', `$${values.length}`)
+    }
+    where.push(indexed)
+  }
   if (query.sapId) {
     const sapId = String(query.sapId).trim().toUpperCase()
     if (!/^[A-Z0-9]{1,40}$/.test(sapId)) throw bad('SAP ID filter is invalid')
     filters.sapId = sapId
-    add('upper(al.actor_sap_id) = ?', sapId)
+    if (filters.sapIdScope === 'changedBy') add('upper(al.actor_sap_id) = ?', sapId)
+    else add(`upper(CASE
+      WHEN al.entity_type='laptop_request' THEN owner_profile.sap_id
+      WHEN al.entity_type='user' THEN COALESCE(target_user.sap_id, al.details->>'sapId')
+      WHEN al.entity_type='retirement_clearance' THEN clearance_profile.sap_id
+      WHEN al.entity_type='retirement_clearance_check' THEN check_clearance_profile.sap_id
+      ELSE NULL END) = ?`, sapId)
   }
   if (query.action) {
     const action = String(query.action).trim()
-    if (!/^[a-zA-Z0-9_-]{1,100}$/.test(action)) throw bad('Action filter is invalid')
-    filters.action = action
-    add('al.action = ?', action)
+    if (action.length > 100) throw bad('Action search must be at most 100 characters')
+    if (action) {
+      filters.action = action
+      const escaped = action.replace(/[\\%_]/g, '\\$&').toLowerCase()
+      add(`(lower(al.action) ILIKE ? ESCAPE E'\\\\' OR lower(CASE al.action
+        WHEN 'account_created' THEN 'Account created'
+        WHEN 'account_updated' THEN 'Account updated'
+        WHEN 'account_profile_created' THEN 'Account profile created'
+        WHEN 'account_profile_updated' THEN 'Account profile updated'
+        WHEN 'registered_on_behalf' THEN 'Laptop registered on behalf'
+        WHEN 'laptop_request_submitted' THEN 'Laptop request submitted'
+        WHEN 'laptop_request_edited' THEN 'Laptop request edited'
+        WHEN 'employee_resubmitted' THEN 'Employee correction submitted'
+        WHEN 'correction_resubmitted' THEN 'Correction submitted'
+        WHEN 'engineer_approved' THEN 'Engineer approved'
+        WHEN 'engineer_rejected' THEN 'Engineer rejected'
+        WHEN 'admin_approved' THEN 'Admin approved'
+        WHEN 'admin_rejected' THEN 'Admin rejected'
+        WHEN 'invoice_replaced' THEN 'Invoice replaced'
+        WHEN 'report_exported' THEN 'Report exported'
+        WHEN 'audit_exported' THEN 'Audit exported'
+        WHEN 'retirement_clearance_created' THEN 'Retirement clearance created'
+        WHEN 'retirement_clearance_finalized' THEN 'Retirement clearance completed'
+        WHEN 'retirement_check_added' THEN 'Clearance check added'
+        WHEN 'retirement_check_updated' THEN 'Clearance check updated'
+        WHEN 'retirement_check_deleted' THEN 'Clearance check deleted'
+        ELSE replace(al.action, '_', ' ') END) ILIKE ? ESCAPE E'\\\\')`, `%${escaped}%`, `%${escaped}%`)
+    }
   }
-  if (filters.from) add('al.occurred_at >= ?::date', filters.from)
-  if (filters.to) add("al.occurred_at < (?::date + INTERVAL '1 day')", filters.to)
+  if (filters.from) add('(al.occurred_at >= (?::date::timestamp AT TIME ZONE ?::text))', filters.from, filters.timeZone)
+  if (filters.to) add("(al.occurred_at < ((?::date + 1)::timestamp AT TIME ZONE ?::text))", filters.to, filters.timeZone)
   return { filters, values, clause: where.length ? `WHERE ${where.join(' AND ')}` : '' }
 }
 function readPage(query) {
@@ -73,6 +119,10 @@ function publicChanges(details) {
 function readableAction(action) {
   return ACTION_LABELS[action] ?? String(action).split(/[_-]+/).filter(Boolean).map((part) => part[0].toUpperCase() + part.slice(1)).join(' ')
 }
+function personLabel(name, sapId) {
+  if (name && sapId) return `${name} (${sapId})`
+  return name || sapId || ''
+}
 function mapRow(row) {
   let who = 'Unknown (legacy)'
   const sapId = row.actorSapId?.trim()
@@ -80,10 +130,10 @@ function mapRow(row) {
   else if (sapId) who = row.actorName ? `${row.actorName} (${sapId})` : sapId
   let affectedRecord = 'Record'
   if (row.entityType === 'laptop_request') {
-    affectedRecord = [row.serialNumber, row.employeeName, row.modelNumber].filter(Boolean).join(' · ') || 'Laptop request'
-  } else if (row.entityType === 'user') affectedRecord = row.targetName || 'Account'
-  else if (row.entityType === 'retirement_clearance') affectedRecord = row.clearanceEmployeeName || 'Retirement clearance'
-  else if (row.entityType === 'retirement_clearance_check') affectedRecord = row.checkEmployeeName || 'Retirement clearance check'
+    affectedRecord = [personLabel(row.employeeName, row.employeeSapId), row.serialNumber, row.modelNumber].filter(Boolean).join(' · ') || 'Laptop request'
+  } else if (row.entityType === 'user') affectedRecord = personLabel(row.targetName, row.targetSapId) || 'Account'
+  else if (row.entityType === 'retirement_clearance') affectedRecord = personLabel(row.clearanceEmployeeName, row.clearanceSapId) || 'Retirement clearance'
+  else if (row.entityType === 'retirement_clearance_check') affectedRecord = personLabel(row.checkEmployeeName, row.checkSapId) || 'Retirement clearance check'
   else if (row.entityType === 'report') affectedRecord = 'Reports'
   return {
     occurredAt: row.occurredAt, who, actorSapId: sapId ?? null,
@@ -111,8 +161,11 @@ const FROM_SQL = `FROM audit_log al
 const SELECT_SQL = `SELECT al.occurred_at AS "occurredAt", al.actor_sap_id AS "actorSapId",
   actor_profile.employee_name AS "actorName", al.action, al.entity_type AS "entityType", al.details,
   lr.serial_number AS "serialNumber", owner_profile.employee_name AS "employeeName", lr.model_number AS "modelNumber",
-  target_profile.employee_name AS "targetName", clearance_profile.employee_name AS "clearanceEmployeeName",
-  check_clearance_profile.employee_name AS "checkEmployeeName" ${FROM_SQL}`
+  COALESCE(target_profile.employee_name, al.details->'changes'->'employeeName'->>'new', al.details->'changes'->'employeeName'->>'old') AS "targetName",
+  COALESCE(target_user.sap_id, al.details->>'sapId') AS "targetSapId",
+  owner_profile.sap_id AS "employeeSapId", clearance_profile.employee_name AS "clearanceEmployeeName",
+  clearance_profile.sap_id AS "clearanceSapId", check_clearance_profile.employee_name AS "checkEmployeeName",
+  check_clearance_profile.sap_id AS "checkSapId" ${FROM_SQL}`
 
 async function selectRows(queryable, clause, values, page = null) {
   const suffix = page ? ` ORDER BY al.occurred_at DESC,al.audit_log_id DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}` : ' ORDER BY al.occurred_at DESC,al.audit_log_id DESC'

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { laptopApi } from '../services/laptopApi.js'
+import { defaultAuditFilters } from '../utils/auditFilters.js'
 
 const PAGE_SIZE = 25
 const FIELD_LABELS = {
@@ -24,8 +25,8 @@ function changeText(entry) {
 }
 
 export default function AuditPage() {
-  const [filters, setFilters] = useState({ sapId: '', action: '', from: '', to: '' })
-  const [active, setActive] = useState(filters)
+  const [filters, setFilters] = useState(() => defaultAuditFilters())
+  const [active, setActive] = useState(() => defaultAuditFilters())
   const [entries, setEntries] = useState([])
   const [pagination, setPagination] = useState({ limit: PAGE_SIZE, offset: 0, total: 0 })
   const [busy, setBusy] = useState(false)
@@ -55,7 +56,8 @@ export default function AuditPage() {
     <section className="surface table-surface">
       <form className="report-filters audit-filters" onSubmit={apply}>
         <label>Person SAP ID<input value={filters.sapId} onChange={(e) => setFilters({ ...filters, sapId: e.target.value })} maxLength={40} /></label>
-        <label>Action<input value={filters.action} onChange={(e) => setFilters({ ...filters, action: e.target.value })} maxLength={100} placeholder="e.g. account_updated" /></label>
+        <label>Match SAP ID<select value={filters.sapIdScope} onChange={(e) => setFilters({ ...filters, sapIdScope: e.target.value })}><option value="changedBy">Changed by</option><option value="affectedEmployee">Affected employee</option></select></label>
+        <label>Search action<input value={filters.action} onChange={(e) => setFilters({ ...filters, action: e.target.value })} maxLength={100} placeholder="Search action label or name" /></label>
         <label>From<input type="date" value={filters.from} onChange={(e) => setFilters({ ...filters, from: e.target.value })} /></label>
         <label>To<input type="date" value={filters.to} onChange={(e) => setFilters({ ...filters, to: e.target.value })} /></label>
         <button className="button button-primary" type="submit" disabled={busy}>Apply filters</button>
