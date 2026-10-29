@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { laptopApi } from '../services/laptopApi.js'
-import { defaultAuditFilters } from '../utils/auditFilters.js'
+import { defaultAuditDateRangeIfEmpty, defaultAuditFilters, formatAuditDateTime } from '../utils/auditFilters.js'
 
 const PAGE_SIZE = 25
 const FIELD_LABELS = {
@@ -9,7 +9,6 @@ const FIELD_LABELS = {
   employeeName: 'Name', designation: 'Designation', employeeCategory: 'Category', department: 'Department',
   sapId: 'SAP ID', email: 'Email', role: 'Role', isActive: 'Account status', windowsKey: 'Windows key', officeKey: 'MS Office key',
 }
-function dateTime(value) { return value ? new Date(value).toLocaleString() : '—' }
 function changeText(entry) {
   const parts = []
   for (const [field, change] of Object.entries(entry.changes ?? {})) {
@@ -43,6 +42,7 @@ export default function AuditPage() {
 
   useEffect(() => { load(0, active) }, [active, load])
   const apply = (event) => { event.preventDefault(); setPagination((page) => ({ ...page, offset: 0 })); setActive({ ...filters, sapId: filters.sapId.trim().toUpperCase(), action: filters.action.trim() }) }
+  const defaultDateRangeOnFocus = () => setFilters((current) => defaultAuditDateRangeIfEmpty(current))
   const download = async () => {
     setBusy(true); setError('')
     try { await laptopApi.downloadAuditExcel(active) }
@@ -55,17 +55,17 @@ export default function AuditPage() {
     {error && <div className="form-error" role="alert">{error}</div>}
     <section className="surface table-surface">
       <form className="report-filters audit-filters" onSubmit={apply}>
-        <label>Person SAP ID<input value={filters.sapId} onChange={(e) => setFilters({ ...filters, sapId: e.target.value })} maxLength={40} /></label>
+        <label>Person SAP ID<input value={filters.sapId} onChange={(e) => setFilters({ ...filters, sapId: e.target.value })} maxLength={8} pattern="[A-Za-z0-9]{8}" title="SAP ID must be exactly 8 characters" /></label>
         <label>Match SAP ID<select value={filters.sapIdScope} onChange={(e) => setFilters({ ...filters, sapIdScope: e.target.value })}><option value="changedBy">Changed by</option><option value="affectedEmployee">Affected employee</option></select></label>
         <label>Search action<input value={filters.action} onChange={(e) => setFilters({ ...filters, action: e.target.value })} maxLength={100} placeholder="Search action label or name" /></label>
-        <label>From<input type="date" value={filters.from} onChange={(e) => setFilters({ ...filters, from: e.target.value })} /></label>
-        <label>To<input type="date" value={filters.to} onChange={(e) => setFilters({ ...filters, to: e.target.value })} /></label>
+        <label>From<input type="date" value={filters.from} onFocus={defaultDateRangeOnFocus} onChange={(e) => setFilters({ ...filters, from: e.target.value })} /></label>
+        <label>To<input type="date" value={filters.to} onFocus={defaultDateRangeOnFocus} onChange={(e) => setFilters({ ...filters, to: e.target.value })} /></label>
         <button className="button button-primary" type="submit" disabled={busy}>Apply filters</button>
         <button className="button button-quiet" type="button" onClick={download} disabled={busy}>Download Excel</button>
       </form>
       <div className="table-scroll"><table className="audit-table"><thead><tr><th>WHEN</th><th>WHO</th><th>ACTION</th><th>AFFECTED RECORD</th><th>WHAT CHANGED</th></tr></thead>
         <tbody>{entries.map((entry, index) => <tr key={`${entry.occurredAt}-${entry.action}-${index}`}>
-          <td>{dateTime(entry.occurredAt)}</td><td>{entry.who}</td><td>{entry.actionLabel}</td><td>{entry.affectedRecord}</td><td>{changeText(entry)}</td>
+          <td>{formatAuditDateTime(entry.occurredAt)}</td><td>{entry.who}</td><td>{entry.actionLabel}</td><td>{entry.affectedRecord}</td><td>{changeText(entry)}</td>
         </tr>)}
         {!entries.length && <tr><td colSpan="5" className="table-message">{busy ? 'Loading audit entries…' : 'No audit entries match these filters.'}</td></tr>}</tbody>
       </table></div>

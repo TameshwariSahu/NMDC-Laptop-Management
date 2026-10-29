@@ -70,6 +70,23 @@ test('Audit API is Admin-only; Engineer and Employee receive 403', { skip: !read
   assert.deepEqual([engList.status,empList.status,engExport.status,empExport.status],[403,403,403,403])
   const adminResponse = await api('/admin/audit?limit=1',admin)
   assert.equal(adminResponse.status,200)
+  const invalidSap = await api('/admin/audit?sapId=ABC1234&limit=1',admin)
+  assert.equal(invalidSap.status,400)
+})
+
+test('Audit without date filters returns the full newest-first list', { skip: !ready }, async () => {
+  const admin = await actor('admin','Synthetic All Audit Admin')
+  const owner = await actor('employee','Synthetic All Audit Owner')
+  await seedAudit(admin,owner)
+  const response = await api(queryLikeClient({ limit: 100, offset: 0 }),admin)
+  assert.equal(response.status,200)
+  const result = await response.json()
+  assert.ok(result.pagination.total >= 2)
+  assert.equal(result.entries.length,Math.min(100,result.pagination.total))
+  assert.ok(result.entries.some((entry) => entry.action === 'laptop_request_edited'))
+  for (let index=1; index<result.entries.length; index+=1) {
+    assert.ok(new Date(result.entries[index-1].occurredAt) >= new Date(result.entries[index].occurredAt))
+  }
 })
 
 test('Audit filters, pagination, labels and response exclude secret and key material', { skip: !ready }, async () => {

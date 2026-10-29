@@ -49,7 +49,7 @@ function readFilters(query) {
   }
   if (query.sapId) {
     const sapId = String(query.sapId).trim().toUpperCase()
-    if (!/^[A-Z0-9]{1,40}$/.test(sapId)) throw bad('SAP ID filter is invalid')
+    if (!/^[A-Z0-9]{8}$/.test(sapId)) throw bad('SAP ID must be exactly 8 characters')
     filters.sapId = sapId
     if (filters.sapIdScope === 'changedBy') add('upper(al.actor_sap_id) = ?', sapId)
     else add(`upper(CASE

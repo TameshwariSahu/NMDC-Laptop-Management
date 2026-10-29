@@ -86,7 +86,8 @@ includes Created By and Updated By SAP ID columns.
 ## Admin audit
 
 `GET /admin/audit` is Admin-only. Role authorization is checked against the
-current database account on every request. Optional filters are `sapId`,
+current database account on every request. Optional filters are an exact
+8-character alphanumeric `sapId`,
 `sapIdScope` (`changedBy` or `affectedEmployee`), `action` (case-insensitive
 substring search over the readable label or stored action), `from` and `to`
 (`YYYY-MM-DD`); pagination uses `limit` (1–100) and `offset`. The client sends
@@ -96,6 +97,9 @@ SAP ID alone, or `Unknown (legacy)`), readable action label, affected record,
 safe change summary, and pagination metadata. Old audit rows without field
 values show changed field names when available. Secret values, tokens, OTPs,
 license key values, ciphertext and HMAC fingerprints are excluded.
+The Admin Audit page opens without a date filter and shows entries newest first.
+Focusing a date input while both bounds are empty sets From and To to today's
+local date; the user can then adjust either bound or clear both to show all.
 
 `GET /admin/audit/export.xlsx` applies the same filters and exports every
 matching audit entry. Export activity is recorded as `audit_exported`, with
